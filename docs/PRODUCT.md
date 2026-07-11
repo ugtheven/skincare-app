@@ -1,5 +1,41 @@
 # Product Context
 
+## Register
+
+product
+
+## Platform
+
+ios
+
+## Users
+
+The primary audience includes both skincare beginners who want to discover and build a routine, and experienced users who mainly need a fast way to track what they do. The interface should support progressive disclosure so neither audience is forced into the other's level of detail.
+
+## Product Purpose
+
+Help people understand their products, build a coherent routine, know what is done, what remains, and what is planned, then observe what appears to work over time.
+
+## Brand Personality
+
+Clear, warm, reliable. The product should feel simple and effective, with satisfaction coming from the quality of use rather than decorative beauty codes.
+
+## Anti-references
+
+Avoid strongly masculine or gendered styling, beauty apps centered on "glow", medical or anxiety-inducing interfaces, and overloaded dashboards. This is a tracking and todo product, not a medical product.
+
+## Design Principles
+
+- Make the next action obvious.
+- Turn a routine into a calm, reliable checklist.
+- Explain progressively without slowing experienced users down.
+- Use subtle interaction feedback to make completion satisfying.
+- Prefer clarity and consistency over decoration.
+
+## Accessibility & Inclusion
+
+V1 must support light and dark mode, sufficient contrast, touch targets suitable for iOS, and no meaning conveyed by color alone. Reduced Motion must be respected. Dynamic iOS text sizing and independently disabling haptics are deferred for now.
+
 ## Vision
 
 Build a simple mobile skincare companion that helps people understand their products, follow a routine, manage sun protection, and observe changes over time.

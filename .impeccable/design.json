@@ -1,0 +1,117 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-07-12T00:00:00.000Z",
+  "title": "Design System: Skincare App",
+  "extensions": {
+    "colorMeta": {
+      "petroleum": {
+        "role": "primary",
+        "displayName": "Soft Petroleum",
+        "canonical": "oklch(0.420 0.105 220)",
+        "tonalRamp": [
+          "oklch(0.955 0.015 220)",
+          "oklch(0.720 0.080 220)",
+          "oklch(0.420 0.105 220)",
+          "oklch(0.300 0.080 220)"
+        ]
+      },
+      "sun-amber": {
+        "role": "tertiary",
+        "displayName": "Sun Amber",
+        "canonical": "oklch(0.720 0.145 60)",
+        "tonalRamp": [
+          "oklch(0.960 0.040 60)",
+          "oklch(0.850 0.100 60)",
+          "oklch(0.720 0.145 60)",
+          "oklch(0.480 0.105 60)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "SF Pro Display",
+        "purpose": "Top-level Today titles and major progress moments."
+      },
+      "body": {
+        "displayName": "SF Pro Text",
+        "purpose": "Readable native iOS body copy and controls."
+      }
+    },
+    "shadows": [
+      {
+        "name": "raised-control",
+        "value": "0 2px 8px rgba(10, 34, 42, 0.10)",
+        "purpose": "Separate a control from its surface when tonal layering is insufficient."
+      },
+      {
+        "name": "focused-sheet",
+        "value": "0 8px 24px rgba(0, 0, 0, 0.18)",
+        "purpose": "Provide structure for a focused sheet or transient surface."
+      }
+    ],
+    "motion": [
+      {
+        "name": "state-transition",
+        "value": "150-250ms ease-out",
+        "purpose": "Default timing for buttons, selection, and routine state changes."
+      },
+      {
+        "name": "routine-complete",
+        "value": "short scale-and-check feedback",
+        "purpose": "Make one-tap completion satisfying without delaying the workflow."
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Routine Row",
+      "kind": "custom",
+      "refersTo": "routine-row",
+      "description": "A fast one-tap todo row for a skincare step.",
+      "html": "<div class=\"routine-row\"><span>Hydrating cleanser</span><button aria-label=\"Mark complete\">Done</button></div>",
+      "css": ".routine-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 16px; min-height: 48px; border-radius: 12px; background: oklch(0.965 0.012 220); color: oklch(0.205 0.025 220); } .routine-row button { min-width: 44px; min-height: 44px; border: 0; border-radius: 12px; background: oklch(0.420 0.105 220); color: oklch(0.955 0.010 220); transition: transform 180ms ease-out, opacity 180ms ease-out; } .routine-row button:active { transform: scale(0.97); }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Minimal Bathroom Counter",
+    "overview": "A calm, well-organized bathroom counter in soft morning light: familiar, useful, and carefully arranged without looking precious. The product is a tracking and todo experience first. Warmth comes from clear hierarchy and tactile completion feedback rather than beauty advertising or decoration.",
+    "keyCharacteristics": [
+      "Calm and task-oriented",
+      "Warm through interaction quality",
+      "Familiar to iOS users",
+      "Progressive detail",
+      "Restrained completion feedback"
+    ],
+    "rules": [
+      {
+        "name": "The One Useful Accent Rule",
+        "body": "Petroleum blue marks an action, a selected state, or meaningful progress. It is not background decoration.",
+        "section": "colors"
+      },
+      {
+        "name": "The Native Reading Rule",
+        "body": "Use iOS text styles and let the system remain the dominant typographic voice.",
+        "section": "typography"
+      },
+      {
+        "name": "The Quiet Surface Rule",
+        "body": "A routine row should be easy to scan at rest. Elevation appears only to clarify layering or a state change.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do make the next action obvious.",
+      "Do use native iOS structure and safe areas.",
+      "Do support light and dark mode.",
+      "Do respect Reduce Motion.",
+      "Do make completion feel satisfying."
+    ],
+    "donts": [
+      "Don't make the app strongly masculine, strongly feminine, or beauty-coded.",
+      "Don't make it medical or anxiety-inducing.",
+      "Don't overload the dashboard.",
+      "Don't use decorative motion without state meaning.",
+      "Don't communicate status through color alone."
+    ]
+  }
+}
