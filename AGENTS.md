@@ -31,6 +31,13 @@ Record durable technical or product decisions in `docs/DECISIONS.md`.
 - Do not use guilt-based messages or aggressive gamification.
 - Include accessibility, reduced-motion support, and dynamic text from the start.
 
+## UI design workflow
+
+- Use the project-local `$impeccable` skill for UI work, UX critique, accessibility, layout, color, typography, motion, and polish.
+- Run `$impeccable init` once before the first substantial UI feature, then use `$impeccable shape`, `$impeccable craft`, `$impeccable audit`, and `$impeccable polish` as appropriate.
+- Treat `docs/PRODUCT.md` as the product source of truth and keep the Impeccable design context aligned with its mixed, warm, non-gendered skincare direction.
+- Verify UI changes visually on iOS-sized screens and respect reduced-motion settings.
+
 ## Development workflow
 
 Use the loop defined in `docs/WORKFLOW.md`:
