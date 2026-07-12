@@ -1,10 +1,9 @@
-import { StyleSheet, Text, View, useColorScheme } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 
 import { Colors } from '@/constants/theme';
 
 export default function ProgressScreen() {
-  const colorScheme = useColorScheme() ?? 'light';
-  const colors = Colors[colorScheme];
+  const colors = Colors;
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
