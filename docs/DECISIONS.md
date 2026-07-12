@@ -13,6 +13,27 @@ Record only decisions that should guide future work.
 
 ## Decisions
 
+### 2026-07-12 - Local-first routine persistence
+
+- **Status:** accepted
+- **Context:** The first usable routine flow must survive an app restart, while the product will eventually support synchronisation.
+- **Decision:** Store routines, their ordered free-text steps, and step completion states in a versioned local SQLite database. Access it only through a repository interface rather than from the interface layer.
+- **Consequences:** The first release works offline and without an account. A future remote repository can implement the same domain contract for synchronisation; SQLite migrations must be maintained as the schema evolves.
+
+### 2026-07-12 - Planned-day completion without a user-facing time
+
+- **Status:** accepted
+- **Context:** Users want to know whether a routine was done, not the exact completion time. Evening care may finish after midnight.
+- **Decision:** Record each step as done or not done for its planned date. Do not treat a completion timestamp as product data. Until 04:00, an evening routine remains attached to the previous planned day; technical update timestamps remain internal only.
+- **Consequences:** History measures consistency by routine day. Future synchronisation can use internal metadata without exposing it in the product.
+
+### 2026-07-12 - Empty first-run onboarding
+
+- **Status:** accepted
+- **Context:** First-time users should begin with their own routine rather than sample skincare data.
+- **Decision:** Start with an empty state and guide the user to create one morning or evening routine with free-text steps. Linking a step to a product is deferred.
+- **Consequences:** The first useful loop is available without a product catalogue; routine editing and product linking become the next feature slices.
+
 ### 2026-07-12 - Single light appearance
 
 - **Status:** accepted
