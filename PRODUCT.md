@@ -38,7 +38,7 @@ Avoid strongly masculine or gendered styling, beauty apps centered on "glow", me
 
 ## Accessibility & Inclusion
 
-V1 must support light and dark mode, sufficient contrast, iOS-sized touch targets, and no meaning conveyed by color alone. Reduced Motion must be respected. Dynamic iOS text sizing and independently disabling haptics are deferred for now.
+V1 uses a single light appearance, sufficient contrast, iOS-sized touch targets, and no meaning conveyed by color alone. Reduced Motion must be respected. Dynamic iOS text sizing and independently disabling haptics are deferred for now.
 
 ## V1 Scope
 

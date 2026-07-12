@@ -9,10 +9,6 @@ colors:
   surface-light: 'oklch(0.965 0.012 220)'
   ink-light: 'oklch(0.205 0.025 220)'
   muted-light: 'oklch(0.455 0.025 220)'
-  background-dark: 'oklch(0.145 0.020 220)'
-  surface-dark: 'oklch(0.220 0.025 220)'
-  ink-dark: 'oklch(0.955 0.010 220)'
-  muted-dark: 'oklch(0.730 0.020 220)'
 typography:
   display:
     fontFamily: 'SF Pro Display, system-ui, sans-serif'
@@ -53,7 +49,7 @@ spacing:
 components:
   button-primary:
     backgroundColor: '{colors.petroleum}'
-    textColor: '{colors.ink-dark}'
+    textColor: '#FFFFFF'
     rounded: '{rounded.md}'
     padding: '12px 16px'
     height: '48px'
@@ -83,7 +79,7 @@ components:
 
 This product should feel like a quiet, well-organized bathroom counter in soft morning light: familiar, useful, and carefully arranged without looking precious. It is a tracking and todo experience first. The visual system earns warmth through clear hierarchy, tactile completion feedback, and restrained color rather than through beauty advertising or decorative illustration.
 
-The system is iOS-first and follows native expectations: safe areas, tab navigation, Dynamic Island and home-indicator clearance, SF Pro typography, semantic system behavior, and familiar touch targets. The petroleum blue carries the product identity; white and cool neutral surfaces keep the interface legible in both light and dark mode.
+The system is iOS-first and follows native expectations: safe areas, tab navigation, Dynamic Island and home-indicator clearance, SF Pro typography, semantic system behavior, and familiar touch targets. The petroleum blue carries the product identity; white and cool neutral surfaces keep the interface legible in the bright bathroom setting where the app is primarily used.
 
 It explicitly rejects strongly gendered beauty styling, stereotypical masculine grooming, medical anxiety, overloaded dashboards, and visual decoration that does not clarify the next action.
 
@@ -97,7 +93,7 @@ It explicitly rejects strongly gendered beauty styling, stereotypical masculine 
 
 ## 2. Colors
 
-The palette is restrained: petroleum blue is reserved for action and selected states, while cool neutral surfaces provide calm structure. Light and dark modes share roles, not raw values.
+The palette is restrained: petroleum blue is reserved for action and selected states, while cool neutral surfaces provide calm structure. The app deliberately uses a single light appearance.
 
 ### Primary
 
@@ -105,7 +101,7 @@ The palette is restrained: petroleum blue is reserved for action and selected st
 
 ### Secondary
 
-- **Deep Petroleum** (`oklch(0.300 0.080 220)`): Pressed states, high-emphasis text on tinted surfaces, and dark-mode action treatment.
+- **Deep Petroleum** (`oklch(0.300 0.080 220)`): Pressed states and high-emphasis text on tinted surfaces.
 
 ### Tertiary
 
@@ -113,14 +109,10 @@ The palette is restrained: petroleum blue is reserved for action and selected st
 
 ### Neutral
 
-- **Light Background** (`oklch(1.000 0.000 0)`): Main light-mode background.
+- **Light Background** (`oklch(1.000 0.000 0)`): Main app background.
 - **Light Surface** (`oklch(0.965 0.012 220)`): Routine rows, grouped surfaces, and secondary controls.
-- **Light Ink** (`oklch(0.205 0.025 220)`): Primary text and icons in light mode.
+- **Light Ink** (`oklch(0.205 0.025 220)`): Primary text and icons.
 - **Light Muted** (`oklch(0.455 0.025 220)`): Supporting labels and secondary metadata.
-- **Dark Background** (`oklch(0.145 0.020 220)`): Main dark-mode background.
-- **Dark Surface** (`oklch(0.220 0.025 220)`): Grouped surfaces and raised content in dark mode.
-- **Dark Ink** (`oklch(0.955 0.010 220)`): Primary text and icons in dark mode.
-- **Dark Muted** (`oklch(0.730 0.020 220)`): Supporting labels and secondary metadata.
 
 ### Named Rules
 
@@ -148,7 +140,7 @@ The palette is restrained: petroleum blue is reserved for action and selected st
 
 ## 4. Elevation
 
-Use a hybrid of tonal layering and restrained shadows. Most content should sit flat on a background or inside a lightly contrasting surface. Shadows are structural and state-based, never decorative atmosphere. In dark mode, prefer surface contrast before shadow.
+Use a hybrid of tonal layering and restrained shadows. Most content should sit flat on a background or inside a lightly contrasting surface. Shadows are structural and state-based, never decorative atmosphere.
 
 ### Shadow Vocabulary
 
@@ -166,7 +158,7 @@ Use a hybrid of tonal layering and restrained shadows. Most content should sit f
 - **Shape:** 12px radius for standard buttons; pills are reserved for compact status tags.
 - **Primary:** Soft Petroleum background, high-contrast light text, 48px minimum height, and at least 44px touch target.
 - **Hover / Focus:** Native pressed feedback, a short 150–250ms state transition, and a visible focus treatment on non-touch platforms.
-- **Secondary / Ghost:** Light or dark surface with ink text. Ghost actions remain visually quieter than primary completion actions.
+- **Secondary / Ghost:** Light surface with ink text. Ghost actions remain visually quieter than primary completion actions.
 
 ### Chips
 
@@ -193,6 +185,10 @@ Use a hybrid of tonal layering and restrained shadows. Most content should sit f
 - **States:** Petroleum tint for the active tab; muted semantic color for inactive tabs; labels remain visible.
 - **Mobile treatment:** Respect safe-area insets and the home indicator. Keep settings and advanced routine editing secondary.
 
+### Today Header
+
+The Today header combines the current temperature and UV context with the active routine. A subtle bathroom image can sit behind the header as an ambient layer, never as a competing illustration. Its motion is limited to a slow opacity shift and becomes static when Reduce Motion is enabled. Weather remains concise (temperature and UV only); the todo list remains the primary action.
+
 ### Routine Row
 
 The signature component is a fast, one-tap todo row. It should show the product or step, its completion state, and any small contextual detail. Completion uses a short scale-and-check feedback, then settles without rearranging the whole screen.
@@ -204,7 +200,7 @@ The signature component is a fast, one-tap todo row. It should show the product 
 - **Do** make the next action obvious and keep routine completion within a few taps.
 - **Do** use petroleum blue for actions, selection, and meaningful progress only.
 - **Do** use native iOS structure, safe areas, semantic colors, and familiar controls.
-- **Do** provide light and dark mode with equivalent hierarchy and contrast.
+- **Do** maintain strong contrast in the single light appearance.
 - **Do** make default content visible before any reveal animation and honor Reduce Motion.
 - **Do** use subtle tactile feedback to make completion feel satisfying.
 - **Do** support beginners with progressive disclosure and experienced users with fast scanning.

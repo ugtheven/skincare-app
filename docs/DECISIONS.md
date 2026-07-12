@@ -13,6 +13,13 @@ Record only decisions that should guide future work.
 
 ## Decisions
 
+### 2026-07-12 - Single light appearance
+
+- **Status:** accepted
+- **Context:** The app is primarily used in a well-lit bathroom. Its dark interface undermined the calm, bright visual direction without improving the core routine flow.
+- **Decision:** Ship V1 in a single light appearance and force the native interface style to light.
+- **Consequences:** Future screens use the light palette only. Contrast, reduced motion, and non-color status cues remain mandatory; adding dark mode later requires a new product decision.
+
 ### 2026-07-11 - Repository-local AI workflow
 
 - **Status:** accepted
