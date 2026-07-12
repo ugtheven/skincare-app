@@ -1,201 +1,128 @@
 import { Image } from 'expo-image';
 import { SymbolView, type SFSymbol } from 'expo-symbols';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  AccessibilityInfo,
-  Animated,
-  Pressable,
-  Platform,
-  ScrollView,
-  StyleSheet,
-  Text,
-  View,
-} from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { FirstRoutineOnboarding } from '@/components/first-routine-onboarding';
 import { Colors } from '@/constants/theme';
-
-type RoutineStep = {
-  id: string;
-  title: string;
-  icon: SFSymbol;
-  completed: boolean;
-  sunRelated?: boolean;
-};
-
-const INITIAL_STEPS: RoutineStep[] = [
-  { id: 'cleanser', title: 'Nettoyant', icon: 'drop', completed: true },
-  {
-    id: 'serum',
-    title: 'Sérum antioxydant',
-    icon: 'sparkles',
-    completed: true,
-  },
-  { id: 'moisturizer', title: 'Hydratant', icon: 'cube', completed: true },
-  {
-    id: 'eye-care',
-    title: 'Contour des yeux',
-    icon: 'eye',
-    completed: false,
-  },
-  {
-    id: 'sunscreen',
-    title: 'Protection solaire',
-    icon: 'sun.max',
-    completed: false,
-    sunRelated: true,
-  },
-  {
-    id: 'lip-balm',
-    title: 'Baume à lèvres',
-    icon: 'capsule.fill',
-    completed: false,
-  },
-];
+import { getRoutineProgress } from '@/domain/routine';
+import { useRoutine } from '@/hooks/use-routine';
 
 export default function HomeScreen() {
   const colors = Colors;
   const insets = useSafeAreaInsets();
-  const [steps, setSteps] = useState(INITIAL_STEPS);
-  const [reduceMotion, setReduceMotion] = useState(false);
-  const ambienceOpacity = useRef(new Animated.Value(0.7)).current;
+  const { occurrence, isLoading, error, refresh, setOccurrence, toggleStep } =
+    useRoutine();
 
-  const completedCount = useMemo(
-    () => steps.filter((step) => step.completed).length,
-    [steps],
-  );
-  const nextStepId = steps.find((step) => !step.completed)?.id;
-  const progress = completedCount / steps.length;
-
-  useEffect(() => {
-    void AccessibilityInfo.isReduceMotionEnabled().then(setReduceMotion);
-    const subscription = AccessibilityInfo.addEventListener(
-      'reduceMotionChanged',
-      setReduceMotion,
+  if (isLoading) {
+    return (
+      <View style={[styles.centered, { backgroundColor: colors.background }]}>
+        <Text style={[styles.loadingText, { color: colors.textSecondary }]}>
+          Préparation de ta routine…
+        </Text>
+      </View>
     );
+  }
 
-    return () => subscription.remove();
-  }, []);
+  if (!occurrence) {
+    if (error)
+      return <LoadError error={error} onRetry={() => void refresh()} />;
+    return <FirstRoutineOnboarding onCreated={setOccurrence} />;
+  }
 
-  useEffect(() => {
-    if (reduceMotion) {
-      ambienceOpacity.setValue(0.7);
-      return undefined;
-    }
-
-    const animation = Animated.loop(
-      Animated.sequence([
-        Animated.timing(ambienceOpacity, {
-          toValue: 0.92,
-          duration: 4500,
-          useNativeDriver: Platform.OS !== 'web',
-        }),
-        Animated.timing(ambienceOpacity, {
-          toValue: 0.7,
-          duration: 4500,
-          useNativeDriver: Platform.OS !== 'web',
-        }),
-      ]),
-    );
-
-    animation.start();
-    return () => animation.stop();
-  }, [ambienceOpacity, reduceMotion]);
-
-  const toggleStep = (id: string) => {
-    setSteps((currentSteps) =>
-      currentSteps.map((step) =>
-        step.id === id ? { ...step, completed: !step.completed } : step,
-      ),
-    );
-  };
+  const progress = getRoutineProgress(occurrence);
+  const scheduledLabel = new Date(
+    `${occurrence.scheduledDate}T12:00:00`,
+  ).toLocaleDateString('fr-FR', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+  });
 
   return (
     <View style={[styles.screen, { backgroundColor: colors.background }]}>
       <ScrollView
-        contentContainerStyle={[styles.content, { paddingBottom: 24 }]}
+        contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}
       >
-        <View style={[styles.header, { paddingTop: insets.top + 56 }]}>
-          <Animated.View
-            style={[styles.headerImage, { opacity: ambienceOpacity }]}
-          >
-            <Image
-              source={require('@/assets/images/today-header.png')}
-              contentFit="cover"
-              contentPosition="right center"
-              style={StyleSheet.absoluteFill}
-              accessible={false}
-            />
-          </Animated.View>
+        <View style={[styles.header, { paddingTop: insets.top + 28 }]}>
+          <Image
+            source={require('@/assets/images/today-header.png')}
+            contentFit="cover"
+            contentPosition="right center"
+            style={StyleSheet.absoluteFill}
+            accessible={false}
+          />
           <View
             style={[
               styles.headerOverlay,
               { backgroundColor: colors.imageOverlay },
             ]}
           />
-
-          <View style={styles.headerContent}>
-            <Text style={[styles.title, { color: colors.text }]}>
-              Aujourd&apos;hui
+          <Text style={[styles.title, { color: colors.text }]}>
+            Aujourd’hui
+          </Text>
+          <View style={styles.routineSummary}>
+            <Text style={[styles.routineTitle, { color: colors.text }]}>
+              {occurrence.routine.name}
             </Text>
-            <View style={styles.weatherRow}>
-              <AppSymbol name="sun.max" color={colors.sun} />
-              <Text style={[styles.weatherText, { color: colors.text }]}>
-                18° aujourd&apos;hui
-              </Text>
-              <Text
-                style={[styles.weatherDivider, { color: colors.textSecondary }]}
-              >
-                ·
-              </Text>
-              <Text style={[styles.uvText, { color: colors.sun }]}>
-                UV 5 modéré
-              </Text>
-            </View>
-
-            <View style={styles.routineSummary}>
-              <Text style={[styles.routineTitle, { color: colors.text }]}>
-                Routine du matin
-              </Text>
-              <Text style={[styles.routineTime, { color: colors.text }]}>
-                7 h 30
-              </Text>
-              <Text
-                style={[styles.routineStatus, { color: colors.textSecondary }]}
-              >
-                {completedCount} terminées · {steps.length - completedCount} à
-                faire
-              </Text>
+            <Text style={[styles.routineDate, { color: colors.textSecondary }]}>
+              Prévue {scheduledLabel}
+            </Text>
+            <Text
+              style={[styles.routineStatus, { color: colors.textSecondary }]}
+            >
+              {progress.isComplete
+                ? 'Routine terminée'
+                : `${progress.completed} terminée${progress.completed > 1 ? 's' : ''} · ${progress.total - progress.completed} à faire`}
+            </Text>
+            <View
+              style={[
+                styles.progressTrack,
+                { backgroundColor: colors.separator },
+              ]}
+            >
               <View
                 style={[
-                  styles.progressTrack,
-                  { backgroundColor: colors.separator },
+                  styles.progressFill,
+                  {
+                    backgroundColor: colors.tint,
+                    width: `${(progress.completed / progress.total) * 100}%`,
+                  },
                 ]}
-              >
-                <View
-                  style={[
-                    styles.progressFill,
-                    {
-                      backgroundColor: colors.tint,
-                      width: `${progress * 100}%`,
-                    },
-                  ]}
-                />
-              </View>
+              />
             </View>
           </View>
         </View>
 
+        {error ? (
+          <View
+            style={[
+              styles.inlineError,
+              { backgroundColor: colors.backgroundSelected },
+            ]}
+          >
+            <Text style={[styles.inlineErrorText, { color: colors.text }]}>
+              {error}
+            </Text>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => void refresh()}
+            >
+              <Text style={[styles.retryText, { color: colors.tint }]}>
+                Réessayer
+              </Text>
+            </Pressable>
+          </View>
+        ) : null}
+
         <View style={styles.routineList}>
-          {steps.map((step) => (
+          {occurrence.steps.map((step) => (
             <RoutineRow
               key={step.id}
-              step={step}
-              isNext={step.id === nextStepId}
-              onPress={() => toggleStep(step.id)}
-              colors={colors}
-              reduceMotion={reduceMotion}
+              title={step.title}
+              completed={step.completed}
+              onPress={() => void toggleStep(step.id)}
             />
           ))}
         </View>
@@ -204,242 +131,190 @@ export default function HomeScreen() {
   );
 }
 
-function RoutineRow({
-  step,
-  isNext,
-  onPress,
-  colors,
-  reduceMotion,
-}: {
-  step: RoutineStep;
-  isNext: boolean;
-  onPress: () => void;
-  colors: typeof Colors;
-  reduceMotion: boolean;
-}) {
-  const scale = useRef(new Animated.Value(1)).current;
-
-  const animateTo = (value: number) => {
-    if (reduceMotion) {
-      scale.setValue(value);
-      return;
-    }
-
-    Animated.spring(scale, {
-      toValue: value,
-      speed: 28,
-      bounciness: 0,
-      useNativeDriver: Platform.OS !== 'web',
-    }).start();
-  };
-
-  const iconColor = step.sunRelated ? colors.sun : colors.tint;
-  const statusColor = step.completed ? colors.success : colors.tint;
-
+function LoadError({ error, onRetry }: { error: string; onRetry: () => void }) {
+  const colors = Colors;
   return (
-    <Animated.View style={{ transform: [{ scale }] }}>
+    <View
+      style={[
+        styles.centered,
+        { backgroundColor: colors.background, padding: 24 },
+      ]}
+    >
+      <Text style={[styles.errorTitle, { color: colors.text }]}>
+        Un instant.
+      </Text>
+      <Text style={[styles.errorBody, { color: colors.textSecondary }]}>
+        {error}
+      </Text>
       <Pressable
-        accessibilityRole="checkbox"
-        accessibilityLabel={`${step.title}, ${step.completed ? 'terminée' : 'à faire'}`}
-        accessibilityHint="Touchez pour modifier l’état de cette étape"
-        accessibilityState={{ checked: step.completed }}
-        onPress={onPress}
-        onPressIn={() => animateTo(0.985)}
-        onPressOut={() => animateTo(1)}
-        style={[
-          styles.routineRow,
-          {
-            backgroundColor: isNext
-              ? colors.backgroundSelected
-              : colors.backgroundElement,
-            borderColor: isNext ? colors.tint : colors.separator,
-          },
-          isNext && styles.nextRoutineRow,
+        accessibilityRole="button"
+        onPress={onRetry}
+        style={({ pressed }) => [
+          styles.retryButton,
+          { backgroundColor: colors.tint, opacity: pressed ? 0.85 : 1 },
         ]}
       >
-        <View
+        <Text style={styles.retryButtonText}>Réessayer</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+function RoutineRow({
+  title,
+  completed,
+  onPress,
+}: {
+  title: string;
+  completed: boolean;
+  onPress: () => void;
+}) {
+  const colors = Colors;
+  return (
+    <Pressable
+      accessibilityRole="checkbox"
+      accessibilityLabel={`${title}, ${completed ? 'terminée' : 'à faire'}`}
+      accessibilityHint="Touchez pour modifier l’état de cette étape"
+      accessibilityState={{ checked: completed }}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.routineRow,
+        {
+          backgroundColor: completed
+            ? colors.backgroundSelected
+            : colors.backgroundElement,
+          borderColor: completed ? colors.tint : colors.separator,
+          opacity: pressed ? 0.84 : 1,
+        },
+      ]}
+    >
+      <View
+        style={[
+          styles.checkControl,
+          {
+            borderColor: completed ? colors.success : colors.textSecondary,
+            backgroundColor: completed ? colors.success : 'transparent',
+          },
+        ]}
+      >
+        {completed ? (
+          <AppSymbol name="checkmark" color="#FFFFFF" size={16} />
+        ) : null}
+      </View>
+      <View style={styles.stepCopy}>
+        <Text style={[styles.stepTitle, { color: colors.text }]}>{title}</Text>
+        <Text
           style={[
-            styles.stepIcon,
-            { backgroundColor: colors.backgroundSelected },
+            styles.stepStatus,
+            { color: completed ? colors.success : colors.textSecondary },
           ]}
         >
-          <AppSymbol name={step.icon} color={iconColor} size={25} />
-        </View>
-        <View style={styles.stepCopy}>
-          <Text style={[styles.stepTitle, { color: colors.text }]}>
-            {step.title}
-          </Text>
-          <View style={styles.statusRow}>
-            {step.completed ? (
-              <AppSymbol
-                name="checkmark.circle.fill"
-                color={statusColor}
-                size={20}
-              />
-            ) : null}
-            <Text style={[styles.stepStatus, { color: statusColor }]}>
-              {step.completed ? 'Terminée' : 'À faire'}
-            </Text>
-          </View>
-        </View>
-        <AppSymbol
-          name="chevron.right"
-          color={colors.textSecondary}
-          size={18}
-        />
-      </Pressable>
-    </Animated.View>
+          {completed ? 'Terminée' : 'À faire'}
+        </Text>
+      </View>
+    </Pressable>
   );
 }
 
 function AppSymbol({
   name,
   color,
-  size = 22,
+  size,
 }: {
   name: SFSymbol;
   color: string;
-  size?: number;
+  size: number;
 }) {
   return (
     <SymbolView
       name={name}
       tintColor={color}
       size={size}
-      weight="medium"
-      fallback={
-        <Text style={{ color, fontSize: size * 0.8 }}>
-          {fallbackIcon(name)}
-        </Text>
-      }
+      weight="semibold"
+      fallback={null}
     />
   );
 }
 
-function fallbackIcon(name: SFSymbol) {
-  if (name.includes('sun')) return '☀';
-  if (name.includes('checkmark')) return '✓';
-  if (name === 'circle') return '○';
-  if (name.includes('chevron')) return '›';
-  if (name.includes('eye')) return '◉';
-  if (name.includes('sparkles')) return '✦';
-  return '●';
-}
-
 const styles = StyleSheet.create({
-  screen: {
-    flex: 1,
-  },
-  content: {
-    gap: 12,
-  },
+  screen: { flex: 1 },
+  content: { gap: 16, paddingBottom: 32 },
+  centered: { alignItems: 'center', flex: 1, justifyContent: 'center' },
+  loadingText: { fontSize: 17 },
   header: {
-    minHeight: 370,
+    minHeight: 300,
     overflow: 'hidden',
-    paddingHorizontal: 24,
     paddingBottom: 24,
+    paddingHorizontal: 24,
   },
-  headerImage: {
-    ...StyleSheet.absoluteFillObject,
-  },
-  headerOverlay: {
-    ...StyleSheet.absoluteFillObject,
-  },
-  headerContent: {
-    flex: 1,
-    justifyContent: 'space-between',
-  },
+  headerOverlay: { ...StyleSheet.absoluteFillObject },
   title: {
-    fontSize: 42,
+    fontSize: 34,
     fontWeight: '700',
-    letterSpacing: -0.8,
+    letterSpacing: -0.7,
+    lineHeight: 40,
   },
-  weatherRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    alignSelf: 'flex-start',
-    gap: 8,
-    marginTop: 14,
-    flexWrap: 'wrap',
-  },
-  weatherText: {
-    fontSize: 17,
-    fontWeight: '500',
-  },
-  weatherDivider: {
-    fontSize: 17,
-  },
-  uvText: {
-    fontSize: 17,
-    fontWeight: '600',
-  },
-  routineSummary: {
-    gap: 6,
-    marginTop: 'auto',
-  },
+  routineSummary: { gap: 6, marginTop: 'auto' },
   routineTitle: {
     fontSize: 28,
     fontWeight: '700',
     letterSpacing: -0.4,
+    lineHeight: 34,
   },
-  routineTime: {
-    fontSize: 19,
-    fontWeight: '500',
-  },
-  routineStatus: {
-    fontSize: 17,
-    marginTop: 2,
-  },
+  routineDate: { fontSize: 16, textTransform: 'capitalize' },
+  routineStatus: { fontSize: 17, marginTop: 4 },
   progressTrack: {
-    height: 7,
     borderRadius: 4,
-    marginTop: 12,
+    height: 7,
+    marginTop: 10,
     overflow: 'hidden',
   },
-  progressFill: {
-    height: '100%',
-    borderRadius: 4,
-  },
-  routineList: {
-    gap: 4,
-    paddingHorizontal: 24,
-  },
+  progressFill: { borderRadius: 4, height: '100%' },
+  routineList: { gap: 8, paddingHorizontal: 24 },
   routineRow: {
     alignItems: 'center',
     borderRadius: 12,
     borderWidth: StyleSheet.hairlineWidth,
     flexDirection: 'row',
-    gap: 16,
-    minHeight: 76,
+    gap: 14,
+    minHeight: 72,
     paddingHorizontal: 16,
     paddingVertical: 12,
   },
-  nextRoutineRow: {
-    borderWidth: StyleSheet.hairlineWidth,
-  },
-  stepIcon: {
+  checkControl: {
     alignItems: 'center',
-    borderRadius: 28,
-    height: 56,
+    borderRadius: 12,
+    borderWidth: 2,
+    height: 28,
     justifyContent: 'center',
-    width: 56,
+    width: 28,
   },
-  stepCopy: {
-    flex: 1,
-    gap: 5,
-  },
-  stepTitle: {
-    fontSize: 20,
-    fontWeight: '600',
-    letterSpacing: -0.2,
-  },
-  statusRow: {
+  stepCopy: { flex: 1, gap: 4 },
+  stepTitle: { fontSize: 18, fontWeight: '600', letterSpacing: -0.15 },
+  stepStatus: { fontSize: 16, fontWeight: '500' },
+  inlineError: {
     alignItems: 'center',
+    borderRadius: 12,
     flexDirection: 'row',
-    gap: 7,
+    gap: 12,
+    justifyContent: 'space-between',
+    marginHorizontal: 24,
+    padding: 14,
   },
-  stepStatus: {
+  inlineErrorText: { flex: 1, fontSize: 15, lineHeight: 20 },
+  retryText: { fontSize: 15, fontWeight: '700' },
+  errorTitle: { fontSize: 28, fontWeight: '700', marginBottom: 8 },
+  errorBody: {
     fontSize: 17,
-    fontWeight: '500',
+    lineHeight: 24,
+    marginBottom: 24,
+    textAlign: 'center',
   },
+  retryButton: {
+    borderRadius: 12,
+    minHeight: 48,
+    paddingHorizontal: 20,
+    justifyContent: 'center',
+  },
+  retryButtonText: { color: '#FFFFFF', fontSize: 17, fontWeight: '700' },
 });
