@@ -8,7 +8,8 @@
     "scheme": "skincare",
     "userInterfaceStyle": "light",
     "ios": {
-      "icon": "./assets/expo.icon"
+      "icon": "./assets/expo.icon",
+      "bundleIdentifier": "com.ugtheven.skincare-app"
     },
     "android": {
       "adaptiveIcon": {
@@ -33,7 +34,14 @@
           "imageWidth": 76
         }
       ],
-      "expo-sqlite"
+      "expo-sqlite",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Autoriser Skincare à utiliser l’appareil photo pour scanner et lire le texte de tes produits.",
+          "recordAudioAndroid": false
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,
