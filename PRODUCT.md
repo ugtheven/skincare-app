@@ -33,12 +33,13 @@ Avoid strongly masculine or gendered styling, beauty apps centered on "glow", me
 - Make the next action obvious.
 - Turn a routine into a calm, reliable checklist.
 - Explain progressively without slowing experienced users down.
+- Surface authoritative ingredient alerts without inventing universal product verdicts.
 - Use subtle interaction feedback to make completion satisfying.
 - Prefer clarity and consistency over decoration.
 
 ## Accessibility & Inclusion
 
-V1 uses a single light appearance, sufficient contrast, iOS-sized touch targets, and no meaning conveyed by color alone. Reduced Motion must be respected. Dynamic iOS text sizing and independently disabling haptics are deferred for now.
+V1 uses a single light appearance, sufficient contrast, iOS-sized touch targets, and no meaning conveyed by color alone. Reduced Motion and Dynamic Type must be respected. Independently disabling haptics is deferred for now.
 
 ## V1 Scope
 
@@ -48,6 +49,10 @@ V1 uses a single light appearance, sufficient contrast, iOS-sized touch targets,
 - A Today screen showing the current routine, progress, relevant sun protection, and next useful action.
 - UV index and recommended sunscreen reapplication tracking without claiming exact protection duration.
 - Weekly skin check-ins with optional photos, simple ratings, and notes.
+
+## Long-term Product Direction
+
+The product should progressively turn verified ingredient lists into evidence-based, contextual alerts. It may surface documented allergens, prohibitions, restrictions, and health-authority opinions, but must show provenance and uncertainty and must not infer danger or non-compliance when essential context such as concentration, formula version, or product use is missing. Personal allergy and ingredient watchlists remain local-first by default. The app informs; it does not diagnose, prescribe, or replace professional advice.
 
 ## Outside V1
 

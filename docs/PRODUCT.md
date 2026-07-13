@@ -34,7 +34,7 @@ Avoid strongly masculine or gendered styling, beauty apps centered on "glow", me
 
 ## Accessibility & Inclusion
 
-V1 uses a single light appearance, sufficient contrast, touch targets suitable for iOS, and no meaning conveyed by color alone. Reduced Motion must be respected. Dynamic iOS text sizing and independently disabling haptics are deferred for now.
+V1 uses a single light appearance, sufficient contrast, touch targets suitable for iOS, and no meaning conveyed by color alone. Reduced Motion and Dynamic Type must be respected. Independently disabling haptics is deferred for now.
 
 ## Vision
 
@@ -43,6 +43,7 @@ Build a simple mobile skincare companion that helps people understand their prod
 The product is not just a cosmetic scanner. Its main value comes from connecting:
 
 - products owned and used;
+- ingredient information and evidence-based alerts;
 - routine frequency and consistency;
 - product introduction dates;
 - reported reactions;
@@ -60,6 +61,16 @@ Direction: **clinical warmth**.
 - practical enough for daily use.
 
 Use language about care, comfort, routine, protection, reactions, and progress. Avoid promises of perfect skin, guaranteed transformation, or medical certainty.
+
+## Ingredient information principles
+
+- Do not invent a universal verdict or reduce a product to a "good" or "bad" score.
+- Do surface documented allergens, prohibitions, restrictions, and health-authority opinions when the available product data supports them.
+- Distinguish a confirmed rule, a conditional restriction, a known allergen, an official recommendation, and an ongoing assessment.
+- Show the source, jurisdiction, publication date, relevant use conditions, and uncertainty behind an alert.
+- Do not infer that a product is dangerous or non-compliant from an INCI name alone when concentration, formula version, product type, or exposure route is unknown.
+- Keep user-declared allergies and personal ingredient watchlists local-first by default and treat them as sensitive data.
+- Inform and help the user verify; do not diagnose, prescribe, forbid use, or replace professional advice.
 
 ## UX principles
 
@@ -79,7 +90,7 @@ Use language about care, comfort, routine, protection, reactions, and progress. 
 - Use a hybrid recognition flow and ask the user to confirm uncertain matches.
 - Explain product purpose, key ingredients, precautions, and confidence.
 - Provide a simple summary with optional detail.
-- Avoid arbitrary universal scores such as "good" or "bad".
+- Avoid arbitrary universal scores such as "good" or "bad" while preserving authoritative warnings.
 
 ### Routines
 
@@ -133,3 +144,13 @@ Settings, profile, and advanced routine management remain secondary.
 - Stock and opening-date management.
 - Carefully worded personalized observations.
 - Shareable summary for a dermatology appointment.
+
+## Product evolution direction
+
+Ingredient intelligence should grow in reviewable stages rather than arrive as an opaque score:
+
+1. Reliable INCI capture, normalization, formula versioning, and provenance.
+2. Versioned regulatory and scientific context from recognized authorities.
+3. Clear product-level alerts with source, scope, confidence, and missing context.
+4. Local-first personal allergen and ingredient watchlists.
+5. Carefully bounded routine-level compatibility and cumulative-use observations.

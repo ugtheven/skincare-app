@@ -1,0 +1,68 @@
+{
+  "version": "5",
+  "redirects": {
+    "https://esm.sh/@supabase/supabase-js@2": "https://esm.sh/@supabase/supabase-js@2.110.2",
+    "https://esm.sh/iceberg-js@^0.8.1?target=denonext": "https://esm.sh/iceberg-js@0.8.1?target=denonext"
+  },
+  "remote": {
+    "https://esm.sh/@supabase/auth-js@2.110.2/denonext/auth-js.mjs": "02c3ba2eb6fadfd5395b7fbbb2f6daff981adc4d228c610cd8c555884ba94cc8",
+    "https://esm.sh/@supabase/functions-js@2.110.2/denonext/functions-js.mjs": "f16a6a2141d65796a072457c46dff07b0cc2fcd521edbadc9d5ac56426b0973e",
+    "https://esm.sh/@supabase/phoenix@0.4.4/denonext/phoenix.mjs": "2c4954292d10fd9137d66a1b7abd73bf24f9771a444c3d4e267b12e1e2b132c8",
+    "https://esm.sh/@supabase/postgrest-js@2.110.2/denonext/postgrest-js.mjs": "a0c0d44d9b023203e5df5dc2d51b0cc85122ed45c25df0f06af2b5150a27a7ec",
+    "https://esm.sh/@supabase/realtime-js@2.110.2/denonext/realtime-js.mjs": "5341f134993ebb381d21f2403ec32572b2b403fe4a19ae6d1764f1420bb2a73b",
+    "https://esm.sh/@supabase/storage-js@2.110.2/denonext/storage-js.mjs": "ba0c8ed0143a94bde0ddb8edf6b9644dd1ffbc84831bb797adc9f764e74f5aa0",
+    "https://esm.sh/@supabase/supabase-js@2.110.2": "a764256c977bc03fc703d7b0031ac3138137a49b9f831775fd7a7f42019f652d",
+    "https://esm.sh/@supabase/supabase-js@2.110.2/denonext/supabase-js.mjs": "71129915da73b28a6d210f232c3082aa1f49932b5a74ea6727ad139d636b041c",
+    "https://esm.sh/iceberg-js@0.8.1/denonext/iceberg-js.mjs": "d839d81a2e3966500ca2cdd0c1cb458e9608bacfc91f7bb67a69b2e878dcdb4f",
+    "https://esm.sh/iceberg-js@0.8.1?target=denonext": "58c849d7fe2bf4eca4a84eb501e83c161a7d8c34ca1bec15a962b3bec3062633",
+    "https://esm.sh/tslib@2.8.1/denonext/tslib.mjs": "c38da5dd6da6281964435002ce204cd586634fe3bdfb24a0ee116f48cf3292e9"
+  },
+  "workspace": {
+    "packageJson": {
+      "dependencies": [
+        "npm:@supabase/supabase-js@^2.110.2",
+        "npm:@testing-library/react-native@^14.0.1",
+        "npm:@types/jest@29.5.14",
+        "npm:@types/react@~19.1.10",
+        "npm:eslint-config-expo@10.0",
+        "npm:eslint-config-prettier@^10.1.8",
+        "npm:eslint-plugin-prettier@^5.5.6",
+        "npm:eslint@^9.39.5",
+        "npm:expo-camera@~17.0.10",
+        "npm:expo-constants@~18.0.13",
+        "npm:expo-device@~8.0.10",
+        "npm:expo-file-system@~19.0.23",
+        "npm:expo-font@~14.0.12",
+        "npm:expo-glass-effect@~0.1.10",
+        "npm:expo-image-manipulator@~14.0.8",
+        "npm:expo-image@~3.0.11",
+        "npm:expo-linking@~8.0.12",
+        "npm:expo-router@~6.0.24",
+        "npm:expo-splash-screen@~31.0.13",
+        "npm:expo-sqlite@~16.0.10",
+        "npm:expo-status-bar@~3.0.9",
+        "npm:expo-symbols@~1.0.8",
+        "npm:expo-system-ui@~6.0.9",
+        "npm:expo-web-browser@~15.0.11",
+        "npm:expo@54",
+        "npm:jest-expo@~54.0.17",
+        "npm:jest@29.7",
+        "npm:prettier@^3.9.5",
+        "npm:react-dom@19.1.0",
+        "npm:react-native-gesture-handler@2.28",
+        "npm:react-native-reanimated@~4.1.1",
+        "npm:react-native-safe-area-context@5.6",
+        "npm:react-native-screens@4.16",
+        "npm:react-native-url-polyfill@3",
+        "npm:react-native-web@0.21",
+        "npm:react-native-worklets@0.5.1",
+        "npm:react-native@0.81.5",
+        "npm:react@19.1.0",
+        "npm:typescript@~5.9.2"
+      ],
+      "overrides": {
+        "uuid": "^11.1.1"
+      }
+    }
+  }
+}

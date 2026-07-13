@@ -11,6 +11,7 @@ export type Routine = {
 export type RoutineStep = {
   id: string;
   routineId: string;
+  productId: string | null;
   title: string;
   position: number;
   createdAt: string;

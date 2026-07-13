@@ -49,6 +49,7 @@ describe('getRoutineProgress', () => {
         {
           id: '1',
           routineId: 'morning',
+          productId: null,
           title: 'Nettoyant',
           position: 0,
           completed: true,
@@ -58,6 +59,7 @@ describe('getRoutineProgress', () => {
         {
           id: '2',
           routineId: 'morning',
+          productId: null,
           title: 'Hydratant',
           position: 1,
           completed: false,

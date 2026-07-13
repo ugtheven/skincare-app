@@ -32,7 +32,11 @@ yarn-error.*
 *.pem
 
 # local env files
+.env
 .env*.local
+
+# Supabase CLI local linkage
+supabase/.temp/
 
 # typescript
 *.tsbuildinfo
@@ -54,3 +58,6 @@ example
 .impeccable/live/annotations/
 .impeccable/live/cache/
 .impeccable/live/*.png
+
+# Local recognition corpus — real photos must never be committed
+.local/product-recognition/

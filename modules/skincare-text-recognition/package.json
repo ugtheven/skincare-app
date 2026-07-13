@@ -1,0 +1,8 @@
+{
+  "name": "skincare-text-recognition",
+  "version": "0.1.0",
+  "description": "On-device iOS packaging text recognition with Apple Vision",
+  "main": "index.ts",
+  "license": "MIT",
+  "private": true
+}

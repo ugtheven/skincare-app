@@ -9,7 +9,7 @@ import type {
 } from './routine-repository';
 
 const DATABASE_NAME = 'skincare.db';
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 6;
 
 type RoutineRow = {
   id: string;
@@ -22,6 +22,7 @@ type RoutineRow = {
 type StepRow = {
   id: string;
   routine_id: string;
+  product_id: string | null;
   title: string;
   position: number;
   created_at: string;
@@ -53,6 +54,7 @@ function toStep(row: StepRow): RoutineStep & { completed: boolean } {
   return {
     id: row.id,
     routineId: row.routine_id,
+    productId: row.product_id,
     title: row.title,
     position: row.position,
     completed: Boolean(row.completed),
@@ -61,7 +63,7 @@ function toStep(row: StepRow): RoutineStep & { completed: boolean } {
   };
 }
 
-async function getDatabase() {
+export async function openSkincareDatabase() {
   if (!databasePromise) {
     databasePromise = SQLite.openDatabaseAsync(DATABASE_NAME).then(
       async (db) => {
@@ -80,10 +82,12 @@ export async function migrateDatabase(
   const version = await db.getFirstAsync<{ user_version: number }>(
     'PRAGMA user_version',
   );
+  const currentVersion = version?.user_version ?? 0;
 
-  if ((version?.user_version ?? 0) >= SCHEMA_VERSION) return;
+  if (currentVersion >= SCHEMA_VERSION) return;
 
-  await db.execAsync(`
+  if (currentVersion === 0) {
+    await db.execAsync(`
     PRAGMA journal_mode = WAL;
 
     CREATE TABLE IF NOT EXISTS routines (
@@ -94,9 +98,29 @@ export async function migrateDatabase(
       updated_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS products (
+      id TEXT PRIMARY KEY NOT NULL,
+      name TEXT NOT NULL,
+      brand TEXT,
+      category TEXT,
+      barcode TEXT UNIQUE,
+      image_url TEXT,
+      image_source TEXT,
+      image_source_url TEXT,
+      image_license TEXT,
+      image_license_url TEXT,
+      ingredients_text TEXT,
+      ingredients_source TEXT,
+      ingredients_source_url TEXT,
+      source TEXT NOT NULL CHECK (source IN ('manual', 'barcode')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS routine_steps (
       id TEXT PRIMARY KEY NOT NULL,
       routine_id TEXT NOT NULL REFERENCES routines(id) ON DELETE CASCADE,
+      product_id TEXT REFERENCES products(id) ON DELETE SET NULL,
       title TEXT NOT NULL,
       position INTEGER NOT NULL,
       created_at TEXT NOT NULL,
@@ -117,13 +141,135 @@ export async function migrateDatabase(
     CREATE INDEX IF NOT EXISTS idx_step_completions_routine_date
       ON step_completions(routine_id, scheduled_date);
 
+    CREATE INDEX IF NOT EXISTS idx_products_created_at ON products(created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS product_identifiers (
+      product_id TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL CHECK (kind IN ('barcode', 'qr')),
+      raw_value TEXT NOT NULL,
+      normalized_value TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (product_id, normalized_value)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_product_identifiers_product
+      ON product_identifiers(product_id);
+
+    CREATE TABLE IF NOT EXISTS ingredients (
+      normalized_name TEXT PRIMARY KEY NOT NULL,
+      canonical_name TEXT NOT NULL,
+      review_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (review_status IN ('pending', 'verified'))
+    );
+
+    CREATE TABLE IF NOT EXISTS product_ingredients (
+      product_id TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      normalized_name TEXT NOT NULL REFERENCES ingredients(normalized_name),
+      position INTEGER NOT NULL,
+      raw_name TEXT NOT NULL,
+      PRIMARY KEY (product_id, position)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_product_ingredients_name
+      ON product_ingredients(normalized_name);
+
     PRAGMA user_version = ${SCHEMA_VERSION};
   `);
+    return;
+  }
+
+  if (currentVersion === 1) {
+    await db.execAsync(`
+      CREATE TABLE IF NOT EXISTS products (
+      id TEXT PRIMARY KEY NOT NULL,
+      name TEXT NOT NULL,
+      brand TEXT,
+      category TEXT,
+      barcode TEXT UNIQUE,
+      image_url TEXT,
+      source TEXT NOT NULL CHECK (source IN ('manual', 'barcode')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+      ALTER TABLE routine_steps ADD COLUMN product_id TEXT REFERENCES products(id) ON DELETE SET NULL;
+
+      CREATE INDEX IF NOT EXISTS idx_products_created_at ON products(created_at DESC);
+
+      PRAGMA user_version = 2;
+    `);
+  }
+
+  if (currentVersion <= 2) {
+    await db.execAsync(`
+    CREATE TABLE IF NOT EXISTS product_identifiers (
+      product_id TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL CHECK (kind IN ('barcode', 'qr')),
+      raw_value TEXT NOT NULL,
+      normalized_value TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (product_id, normalized_value)
+    );
+
+    INSERT OR IGNORE INTO product_identifiers
+      (product_id, kind, raw_value, normalized_value, created_at)
+    SELECT id, 'barcode', barcode, barcode, created_at
+    FROM products
+    WHERE barcode IS NOT NULL;
+
+    CREATE INDEX IF NOT EXISTS idx_product_identifiers_product
+      ON product_identifiers(product_id);
+
+    PRAGMA user_version = 3;
+  `);
+  }
+
+  if (currentVersion <= 3) {
+    await db.execAsync(`
+      ALTER TABLE products ADD COLUMN ingredients_text TEXT;
+      ALTER TABLE products ADD COLUMN ingredients_source TEXT;
+      ALTER TABLE products ADD COLUMN ingredients_source_url TEXT;
+      PRAGMA user_version = 4;
+    `);
+  }
+
+  if (currentVersion <= 4) {
+    await db.execAsync(`
+      ALTER TABLE products ADD COLUMN image_source TEXT;
+      ALTER TABLE products ADD COLUMN image_source_url TEXT;
+      ALTER TABLE products ADD COLUMN image_license TEXT;
+      ALTER TABLE products ADD COLUMN image_license_url TEXT;
+      PRAGMA user_version = ${SCHEMA_VERSION};
+    `);
+  }
+
+  if (currentVersion <= 5) {
+    await db.execAsync(`
+      CREATE TABLE IF NOT EXISTS ingredients (
+        normalized_name TEXT PRIMARY KEY NOT NULL,
+        canonical_name TEXT NOT NULL,
+        review_status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (review_status IN ('pending', 'verified'))
+      );
+
+      CREATE TABLE IF NOT EXISTS product_ingredients (
+        product_id TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+        normalized_name TEXT NOT NULL REFERENCES ingredients(normalized_name),
+        position INTEGER NOT NULL,
+        raw_name TEXT NOT NULL,
+        PRIMARY KEY (product_id, position)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_product_ingredients_name
+        ON product_ingredients(normalized_name);
+      PRAGMA user_version = ${SCHEMA_VERSION};
+    `);
+  }
 }
 
 export class SQLiteRoutineRepository implements RoutineRepository {
   async getCurrentOccurrence(now: Date): Promise<RoutineOccurrence | null> {
-    const db = await getDatabase();
+    const db = await openSkincareDatabase();
     const routines = await db.getAllAsync<RoutineRow>(
       'SELECT * FROM routines ORDER BY created_at ASC LIMIT 1',
     );
@@ -149,7 +295,7 @@ export class SQLiteRoutineRepository implements RoutineRepository {
   }
 
   async createRoutine(input: CreateRoutineInput): Promise<RoutineOccurrence> {
-    const db = await getDatabase();
+    const db = await openSkincareDatabase();
     const createdAt = nowIso();
     const routine: Routine = {
       id: createId(),
@@ -164,6 +310,7 @@ export class SQLiteRoutineRepository implements RoutineRepository {
       .map((title, position) => ({
         id: createId(),
         routineId: routine.id,
+        productId: null,
         title,
         position,
         createdAt,
@@ -214,7 +361,7 @@ export class SQLiteRoutineRepository implements RoutineRepository {
     scheduledDate: string;
     completed: boolean;
   }) {
-    const db = await getDatabase();
+    const db = await openSkincareDatabase();
     await db.runAsync(
       `INSERT INTO step_completions
        (routine_id, step_id, scheduled_date, completed, updated_at)
@@ -227,6 +374,36 @@ export class SQLiteRoutineRepository implements RoutineRepository {
       scheduledDate,
       Number(completed),
       nowIso(),
+    );
+  }
+
+  async addProductStep({
+    routineId,
+    productId,
+    title,
+  }: {
+    routineId: string;
+    productId: string;
+    title: string;
+  }) {
+    const db = await openSkincareDatabase();
+    const createdAt = nowIso();
+    const position = await db.getFirstAsync<{ next_position: number }>(
+      'SELECT COALESCE(MAX(position), -1) + 1 AS next_position FROM routine_steps WHERE routine_id = ?',
+      routineId,
+    );
+
+    await db.runAsync(
+      `INSERT INTO routine_steps
+       (id, routine_id, product_id, title, position, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      createId(),
+      routineId,
+      productId,
+      title.trim(),
+      position?.next_position ?? 0,
+      createdAt,
+      createdAt,
     );
   }
 }

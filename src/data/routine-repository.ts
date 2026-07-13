@@ -15,4 +15,9 @@ export interface RoutineRepository {
     scheduledDate: string;
     completed: boolean;
   }): Promise<void>;
+  addProductStep(input: {
+    routineId: string;
+    productId: string;
+    title: string;
+  }): Promise<void>;
 }
