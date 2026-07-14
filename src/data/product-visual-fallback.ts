@@ -5,7 +5,6 @@ import { type RecognizedProductTextLine } from '@/domain/product-recognition';
 
 import {
   lookupProductsByVisualFallback,
-  VisualLookupError,
   type VisualLookupResult,
 } from './shared-product-api';
 
@@ -109,6 +108,7 @@ export async function recognizeProductWithVisualFallback(
   recognizedText: string,
   observations: RecognizedProductTextLine[] = [],
   identifier?: string,
+  signal?: AbortSignal,
 ): Promise<VisualLookupResult> {
   const prepared = await prepareVisualLookupImage(imageUri, observations);
   try {
@@ -116,23 +116,13 @@ export async function recognizeProductWithVisualFallback(
       imageBase64: prepared.base64,
       mimeType: prepared.mimeType,
       recognizedText: recognizedText.trim().slice(0, 3000),
+      requestId: `visual-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
       ...(identifier ? { identifier } : {}),
     } as const;
-    try {
-      return await lookupProductsByVisualFallback(input);
-    } catch (error) {
-      const nonRetryable =
-        error instanceof VisualLookupError &&
-        [
-          'disabled',
-          'invalid_image',
-          'quota_not_configured',
-          'quota_reached',
-        ].includes(error.code);
-      if (nonRetryable) throw error;
-      return await lookupProductsByVisualFallback(input);
-    }
+    return await lookupProductsByVisualFallback(input, signal);
   } finally {
-    await FileSystem.deleteAsync(prepared.temporaryUri, { idempotent: true });
+    await FileSystem.deleteAsync(prepared.temporaryUri, {
+      idempotent: true,
+    }).catch(() => undefined);
   }
 }

@@ -104,6 +104,23 @@ function publicImageUrl(admin: SupabaseClient, storagePath: string) {
   return admin.storage.from(bucket).getPublicUrl(storagePath).data.publicUrl;
 }
 
+async function waitForNormalizedStoragePath(
+  admin: SupabaseClient,
+  imageId: string,
+) {
+  for (const delay of [150, 300, 600, 1_000]) {
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    const { data } = await admin
+      .from('product_images')
+      .select('storage_path, status')
+      .eq('id', imageId)
+      .maybeSingle();
+    if (data?.storage_path) return data.storage_path as string;
+    if (data?.status === 'rejected') return null;
+  }
+  return null;
+}
+
 export async function normalizeSourceImage(
   admin: SupabaseClient,
   source: ImageSource,
@@ -145,6 +162,14 @@ export async function normalizeSourceImage(
     ? publicImageUrl(admin, image.storage_path)
     : null;
   if (!imageUrl) imageUrl = await invokeNormalizer(image.id);
+  if (
+    !imageUrl &&
+    Deno.env.get('PRODUCT_IMAGE_NORMALIZER_URL') &&
+    Deno.env.get('NORMALIZER_JOB_SECRET')
+  ) {
+    const storagePath = await waitForNormalizedStoragePath(admin, image.id);
+    if (storagePath) imageUrl = publicImageUrl(admin, storagePath);
+  }
   if (!imageUrl) return null;
 
   if (productId) {
@@ -204,9 +229,11 @@ export async function ensureNormalizedProductImage(
   product: { id: string; image_url: string | null },
   knownBarcode?: string,
   knownSourceUrl?: string | null,
+  normalizeIfMissing = true,
 ): Promise<NormalizedProductImage | null> {
   const approved = await approvedImageForProduct(admin, product.id);
   if (approved) return approved;
+  if (!normalizeIfMissing) return null;
 
   let barcode = knownBarcode;
   if (!barcode) {

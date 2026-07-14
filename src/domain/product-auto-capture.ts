@@ -1,4 +1,8 @@
-import { normalizeProductText, productTextTokens } from './product-recognition';
+import {
+  normalizeProductText,
+  productTextTokens,
+  type RecognizedProductTextLine,
+} from './product-recognition';
 
 export type AutoCaptureLockStage = 0 | 1 | 2 | 3;
 export type BarcodeGuidanceStage = 'seek' | 'rotate' | 'fallback';
@@ -56,6 +60,23 @@ export function extractValidGtin(recognizedText: string): string | null {
   for (const candidate of candidates) {
     const compact = candidate.replace(/\D/g, '');
     if (isValidGtin(compact)) return compact;
+  }
+
+  return null;
+}
+
+export function extractStrongPrintedGtin(
+  observations: RecognizedProductTextLine[],
+): string | null {
+  for (const observation of observations) {
+    const identifier = extractValidGtin(observation.text);
+    if (!identifier || (observation.confidence ?? 0) < 0.8) continue;
+
+    if (observation.x === undefined || observation.width === undefined) {
+      continue;
+    }
+    const center = observation.x + observation.width / 2;
+    if (center >= 0.2 && center <= 0.8) return identifier;
   }
 
   return null;

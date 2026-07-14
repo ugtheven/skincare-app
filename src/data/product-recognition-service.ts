@@ -119,35 +119,76 @@ export type BarcodeRecognitionDependencies = {
 
 export type BarcodeRecognitionOutcome =
   | { kind: 'local'; product: Product }
-  | { kind: 'draft'; draft: ProductDraft }
+  | {
+      kind: 'draft';
+      draft: ProductDraft;
+      provider: 'public' | 'shared';
+    }
   | { kind: 'not_found' }
   | { kind: 'lookup_unavailable' };
+
+export function barcodeDraftNeedsEnrichment(draft: ProductDraft) {
+  return !draft.imageUrl.trim() || !draft.ingredientsText.trim();
+}
+
+export function mergeBarcodeEnrichment(
+  current: ProductDraft,
+  enriched: ProductDraft,
+): ProductDraft {
+  return {
+    ...current,
+    ...(enriched.imageUrl.trim()
+      ? {
+          imageUrl: enriched.imageUrl,
+          imageSource: enriched.imageSource,
+          imageSourceUrl: enriched.imageSourceUrl,
+          imageLicense: enriched.imageLicense,
+          imageLicenseUrl: enriched.imageLicenseUrl,
+        }
+      : {}),
+    ...(enriched.ingredientsText.trim()
+      ? {
+          ingredientsText: enriched.ingredientsText,
+          ingredientsSource: enriched.ingredientsSource,
+          ingredientsSourceUrl: enriched.ingredientsSourceUrl,
+        }
+      : {}),
+  };
+}
 
 export async function recognizeProductBarcode(
   barcode: string,
   dependencies: BarcodeRecognitionDependencies,
 ): Promise<BarcodeRecognitionOutcome> {
+  let localProduct: Product | null = null;
   try {
-    const localProduct = await dependencies.findLocal(barcode);
-    if (localProduct) return { kind: 'local', product: localProduct };
+    localProduct = await dependencies.findLocal(barcode);
   } catch {
     // A damaged local cache must not prevent remote recognition.
   }
 
   try {
     const sharedProduct = await dependencies.lookupShared(barcode);
-    if (sharedProduct) return { kind: 'draft', draft: sharedProduct };
-    if (sharedProduct === null) return { kind: 'not_found' };
+    if (sharedProduct) {
+      return { kind: 'draft', draft: sharedProduct, provider: 'shared' };
+    }
+    if (sharedProduct === null) {
+      return localProduct
+        ? { kind: 'local', product: localProduct }
+        : { kind: 'not_found' };
+    }
   } catch {
     // The universal public lookup remains available as a fallback.
   }
+
+  if (localProduct) return { kind: 'local', product: localProduct };
 
   if (!isValidGtin(barcode)) return { kind: 'lookup_unavailable' };
 
   try {
     const publicProduct = await dependencies.lookupPublic(barcode);
     return publicProduct
-      ? { kind: 'draft', draft: publicProduct }
+      ? { kind: 'draft', draft: publicProduct, provider: 'public' }
       : { kind: 'not_found' };
   } catch {
     return { kind: 'lookup_unavailable' };

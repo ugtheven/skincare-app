@@ -99,24 +99,13 @@ it('always deletes the re-encoded upload after the server call', async () => {
   );
 });
 
-it('retries one transient visual lookup before surfacing an error', async () => {
-  const result = {
-    candidates: [],
-    googleCandidateCount: 0,
-    normalizedGoogleCandidateCount: 0,
-    serpApiCandidateCount: 0,
-    normalizedSerpApiCandidateCount: 0,
-    serpApiStatus: 'not_configured' as const,
-    catalogueCandidateCount: 0,
-  };
-  mockLookup
-    .mockRejectedValueOnce(new Error('temporary relay failure'))
-    .mockResolvedValueOnce(result);
+it('does not retry a paid visual lookup after a transient error', async () => {
+  mockLookup.mockRejectedValue(new Error('temporary relay failure'));
 
   await expect(
     recognizeProductWithVisualFallback('file:///captured.jpg', 'product text'),
-  ).resolves.toEqual(result);
-  expect(mockLookup).toHaveBeenCalledTimes(2);
+  ).rejects.toThrow('temporary relay failure');
+  expect(mockLookup).toHaveBeenCalledTimes(1);
 });
 
 it('forwards an internal manufacturer code separately from OCR text', async () => {
@@ -138,10 +127,41 @@ it('forwards an internal manufacturer code separately from OCR text', async () =
     '0501601',
   );
 
-  expect(mockLookup).toHaveBeenCalledWith({
-    identifier: '0501601',
-    imageBase64: 'encoded-image',
-    mimeType: 'image/jpeg',
-    recognizedText: 'AROMA-ZONE Sérum cheveux Peptides extrait de Pois',
-  });
+  expect(mockLookup).toHaveBeenCalledWith(
+    {
+      identifier: '0501601',
+      imageBase64: 'encoded-image',
+      mimeType: 'image/jpeg',
+      recognizedText: 'AROMA-ZONE Sérum cheveux Peptides extrait de Pois',
+      requestId: expect.stringMatching(/^visual-/),
+    },
+    undefined,
+  );
+});
+
+it('forwards cancellation to the single provider request', async () => {
+  const result = {
+    candidates: [],
+    googleCandidateCount: 0,
+    normalizedGoogleCandidateCount: 0,
+    serpApiCandidateCount: 0,
+    normalizedSerpApiCandidateCount: 0,
+    serpApiStatus: 'not_needed' as const,
+    catalogueCandidateCount: 0,
+  };
+  const controller = new AbortController();
+  mockLookup.mockResolvedValue(result);
+
+  await recognizeProductWithVisualFallback(
+    'file:///captured.jpg',
+    'Sérum Exemple',
+    [],
+    undefined,
+    controller.signal,
+  );
+
+  expect(mockLookup).toHaveBeenCalledWith(
+    expect.objectContaining({ requestId: expect.stringMatching(/^visual-/) }),
+    controller.signal,
+  );
 });

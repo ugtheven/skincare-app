@@ -1,5 +1,6 @@
 import {
   candidatesFromSerpApiImages,
+  retailerIdentityHintsFromSerpApiImages,
   serpApiGoogleImagesUrl,
 } from './serpapi-product-search';
 import type { ApprovedDomain } from './visual-lookup';
@@ -111,5 +112,31 @@ describe('SerpApi product image search', () => {
         'AROMA-ZONE serum acide glycolique 10 AHA',
       ),
     ).toEqual([]);
+  });
+
+  it('keeps approved retailer titles as identity-only hints', () => {
+    const payload = {
+      images_results: [
+        {
+          title: 'AROMA-ZONE Sérum Acide Glycolique 10% | Sephora',
+          link: 'https://www.sephora.fr/p/serum-glycolique.html',
+        },
+        {
+          title: 'Another brand serum',
+          link: 'https://www.amazon.fr/dp/example',
+        },
+      ],
+    };
+
+    expect(
+      retailerIdentityHintsFromSerpApiImages(
+        payload,
+        [
+          { domain: 'sephora.fr', source_kind: 'retailer' },
+          { domain: 'amazon.fr', source_kind: 'retailer' },
+        ],
+        'AROMA-ZONE',
+      ),
+    ).toEqual(['AROMA-ZONE Sérum Acide Glycolique 10% | Sephora']);
   });
 });

@@ -2,6 +2,7 @@ import {
   hasProductCandidateImage,
   hasDecisiveCandidate,
   hasReliableCandidate,
+  criticalProductVariantsMatch,
   isProductCandidateCompatible,
   isProductCandidateComplete,
   inferProductCategory,
@@ -94,6 +95,43 @@ describe('product text recognition', () => {
     ]);
 
     expect(selected).toEqual([]);
+  });
+
+  it('treats SPF levels and missing SPF as incompatible variants', () => {
+    const query = 'CeraVe Crème Hydratante Visage AM SPF 30';
+    const generic = { ...candidates[1], name: 'Crème Hydratante Visage' };
+    const spf50 = {
+      ...generic,
+      id: 'spf50',
+      name: 'Crème Hydratante Visage SPF50',
+    };
+    const spf30 = {
+      ...generic,
+      id: 'spf30',
+      name: 'Crème Hydratante Visage SPF30',
+    };
+
+    expect(criticalProductVariantsMatch(query, generic.name)).toBe(false);
+    expect(criticalProductVariantsMatch(query, spf50.name)).toBe(false);
+    expect(criticalProductVariantsMatch(query, spf30.name)).toBe(true);
+    expect(selectProductCandidates(query, [generic, spf50, spf30])).toEqual([
+      expect.objectContaining({ id: 'spf30' }),
+    ]);
+  });
+
+  it('requires a percentage when OCR read the percent sign', () => {
+    expect(
+      criticalProductVariantsMatch(
+        'AROMA-ZONE Sérum Niacinamide 10%',
+        'Sérum Niacinamide 5%',
+      ),
+    ).toBe(false);
+    expect(
+      criticalProductVariantsMatch(
+        'AROMA-ZONE Sérum Niacinamide 10',
+        'Sérum Niacinamide 10%',
+      ),
+    ).toBe(true);
   });
 
   it('keeps the distinctive actives of a hair serum and rejects generic brand matches', () => {

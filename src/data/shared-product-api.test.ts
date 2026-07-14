@@ -5,6 +5,7 @@ import {
   lookupSharedProductByIdentifier,
   lookupSharedProductsByText,
   lookupProductsByVisualFallback,
+  refreshSharedProductByIdentifier,
   submitConfirmedWebProduct,
   submitWrongProductGuess,
   textLookupRequestBody,
@@ -132,6 +133,22 @@ describe('shared catalogue network lookup', () => {
     ).resolves.toBeNull();
   });
 
+  it('refreshes completed fields without starting another enrichment job', async () => {
+    mockInvoke.mockResolvedValue({ data: { matches: [] }, error: null });
+
+    await refreshSharedProductByIdentifier('3606000537194');
+
+    expect(mockInvoke).toHaveBeenCalledWith(
+      'product-lookup',
+      expect.objectContaining({
+        body: {
+          mode: 'identifier_refresh',
+          value: '3606000537194',
+        },
+      }),
+    );
+  });
+
   it('creates an anonymous session only when needed', async () => {
     mockGetSession.mockResolvedValue({ data: { session: null } });
     mockInvoke.mockResolvedValue({ data: { matches: [] }, error: null });
@@ -229,6 +246,7 @@ describe('shared catalogue network lookup', () => {
         imageBase64: 'encoded-image',
         mimeType: 'image/jpeg',
         recognizedText: 'Example Brand serum',
+        requestId: 'visual-test-1',
       }),
     ).resolves.toEqual(
       expect.objectContaining({
@@ -259,6 +277,7 @@ describe('shared catalogue network lookup', () => {
         imageBase64: 'encoded-image',
         mimeType: 'image/jpeg',
         recognizedText: 'Example Brand serum',
+        requestId: 'visual-test-2',
       }),
     ).rejects.toEqual(new VisualLookupError('quota_reached'));
   });
@@ -271,6 +290,7 @@ describe('shared catalogue network lookup', () => {
         imageBase64: 'encoded-image',
         mimeType: 'image/jpeg',
         recognizedText: 'Example Brand serum',
+        requestId: 'visual-test-3',
       }),
     ).rejects.toEqual(new VisualLookupError('network_unavailable'));
   });

@@ -1,6 +1,8 @@
 import {
   candidatesFromWebDetection,
+  criticalProductVariantsMatch,
   matchingApprovedDomain,
+  retailerIdentityHintsFromWebDetection,
   visualProductIdentityOverlap,
   webDetectionSignals,
   type ApprovedDomain,
@@ -30,6 +32,23 @@ describe('visual lookup source policy', () => {
         'AROMA-ZONE Sérum Rétinal Optimisé',
         'Sérum concentré Acide glycolique 10% & AHA',
         'AROMA-ZONE',
+      ),
+    ).toBe(0);
+  });
+
+  it('requires the exact SPF level before accepting a visual candidate', () => {
+    const query = 'CeraVe Crème Hydratante Visage AM SPF 30';
+    expect(
+      criticalProductVariantsMatch(query, 'Crème Hydratante Visage SPF30'),
+    ).toBe(true);
+    expect(
+      visualProductIdentityOverlap(query, 'Crème Hydratante Visage', 'CeraVe'),
+    ).toBe(0);
+    expect(
+      visualProductIdentityOverlap(
+        query,
+        'Crème Hydratante Visage SPF50',
+        'CeraVe',
       ),
     ).toBe(0);
   });
@@ -80,6 +99,36 @@ describe('visual lookup source policy', () => {
         score: 0.81,
       }),
     ]);
+  });
+
+  it('uses retailer pages only as brand-bound identity hints', () => {
+    const detection = {
+      pagesWithMatchingImages: [
+        {
+          url: 'https://www.sephora.fr/p/example-brand-night-cream.html',
+          pageTitle: 'Example Brand Night Cream PM | Sephora',
+        },
+        {
+          url: 'https://unknown-shop.test/example-brand-night-cream',
+          pageTitle: 'Example Brand Night Cream PM',
+        },
+        {
+          url: 'https://www.amazon.fr/unrelated-product',
+          pageTitle: 'Unrelated Night Cream',
+        },
+      ],
+    };
+
+    expect(
+      retailerIdentityHintsFromWebDetection(
+        detection,
+        [
+          { domain: 'sephora.fr', source_kind: 'retailer' },
+          { domain: 'amazon.fr', source_kind: 'retailer' },
+        ],
+        'Example Brand',
+      ),
+    ).toEqual(['Example Brand Night Cream PM | Sephora']);
   });
 
   it('combines labels, entities and page titles without image data', () => {

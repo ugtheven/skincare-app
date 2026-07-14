@@ -62,6 +62,35 @@ function toProduct(row: ProductRow): Product {
   };
 }
 
+async function replaceProductIngredients(
+  db: Awaited<ReturnType<typeof openSkincareDatabase>>,
+  productId: string,
+  ingredientsText: string,
+) {
+  await db.runAsync(
+    'DELETE FROM product_ingredients WHERE product_id = ?',
+    productId,
+  );
+  for (const ingredient of parseIngredientList(ingredientsText)) {
+    await db.runAsync(
+      `INSERT OR IGNORE INTO ingredients
+       (normalized_name, canonical_name, review_status)
+       VALUES (?, ?, 'pending')`,
+      ingredient.normalizedName,
+      ingredient.name,
+    );
+    await db.runAsync(
+      `INSERT INTO product_ingredients
+       (product_id, normalized_name, position, raw_name)
+       VALUES (?, ?, ?, ?)`,
+      productId,
+      ingredient.normalizedName,
+      ingredient.position,
+      ingredient.name,
+    );
+  }
+}
+
 export class SQLiteProductRepository implements ProductRepository {
   constructor(
     private readonly openDatabase: typeof openSkincareDatabase = openSkincareDatabase,
@@ -135,7 +164,59 @@ export class SQLiteProductRepository implements ProductRepository {
     const barcode = nullable(draft.barcode);
     if (barcode) {
       const existing = await this.findByIdentifier(barcode);
-      if (existing) return { product: existing, created: false };
+      if (existing) {
+        const db = await this.openDatabase();
+        const updatedAt = nowIso();
+        const product: Product = {
+          ...existing,
+          name: draft.name.trim(),
+          brand: nullable(draft.brand),
+          category: nullable(draft.category),
+          barcode,
+          imageUrl: nullable(draft.imageUrl),
+          imageSource: nullable(draft.imageSource),
+          imageSourceUrl: nullable(draft.imageSourceUrl),
+          imageLicense: nullable(draft.imageLicense),
+          imageLicenseUrl: nullable(draft.imageLicenseUrl),
+          ingredientsText: nullable(draft.ingredientsText),
+          ingredientsSource: nullable(draft.ingredientsSource),
+          ingredientsSourceUrl: nullable(draft.ingredientsSourceUrl),
+          source: draft.source,
+          updatedAt,
+        };
+        await db.withTransactionAsync(async () => {
+          await db.runAsync(
+            `UPDATE products
+             SET name = ?, brand = ?, category = ?, barcode = ?, image_url = ?,
+                 image_source = ?, image_source_url = ?, image_license = ?,
+                 image_license_url = ?, ingredients_text = ?,
+                 ingredients_source = ?, ingredients_source_url = ?,
+                 source = ?, updated_at = ?
+             WHERE id = ?`,
+            product.name,
+            product.brand,
+            product.category,
+            product.barcode,
+            product.imageUrl,
+            product.imageSource,
+            product.imageSourceUrl,
+            product.imageLicense,
+            product.imageLicenseUrl,
+            product.ingredientsText,
+            product.ingredientsSource,
+            product.ingredientsSourceUrl,
+            product.source,
+            product.updatedAt,
+            product.id,
+          );
+          await replaceProductIngredients(
+            db,
+            product.id,
+            draft.ingredientsText,
+          );
+        });
+        return { product, created: false };
+      }
     }
 
     const db = await this.openDatabase();
@@ -159,61 +240,46 @@ export class SQLiteProductRepository implements ProductRepository {
       updatedAt: createdAt,
     };
 
-    await db.runAsync(
-      `INSERT INTO products
+    await db.withTransactionAsync(async () => {
+      await db.runAsync(
+        `INSERT INTO products
        (id, name, brand, category, barcode, image_url, image_source,
         image_source_url, image_license, image_license_url, ingredients_text,
         ingredients_source, ingredients_source_url, source, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      product.id,
-      product.name,
-      product.brand,
-      product.category,
-      product.barcode,
-      product.imageUrl,
-      product.imageSource,
-      product.imageSourceUrl,
-      product.imageLicense,
-      product.imageLicenseUrl,
-      product.ingredientsText,
-      product.ingredientsSource,
-      product.ingredientsSourceUrl,
-      product.source,
-      product.createdAt,
-      product.updatedAt,
-    );
+        product.id,
+        product.name,
+        product.brand,
+        product.category,
+        product.barcode,
+        product.imageUrl,
+        product.imageSource,
+        product.imageSourceUrl,
+        product.imageLicense,
+        product.imageLicenseUrl,
+        product.ingredientsText,
+        product.ingredientsSource,
+        product.ingredientsSourceUrl,
+        product.source,
+        product.createdAt,
+        product.updatedAt,
+      );
 
-    if (barcode) {
-      await db.runAsync(
-        `INSERT INTO product_identifiers
+      if (barcode) {
+        await db.runAsync(
+          `INSERT INTO product_identifiers
          (product_id, kind, raw_value, normalized_value, created_at)
          VALUES (?, ?, ?, ?, ?)`,
-        product.id,
-        identifierKindFor(barcode),
-        barcode,
-        normalizeProductIdentifier(barcode),
-        product.createdAt,
-      );
-    }
+          product.id,
+          identifierKindFor(barcode),
+          barcode,
+          normalizeProductIdentifier(barcode),
+          product.createdAt,
+        );
+      }
 
-    for (const ingredient of parseIngredientList(draft.ingredientsText)) {
-      await db.runAsync(
-        `INSERT OR IGNORE INTO ingredients
-         (normalized_name, canonical_name, review_status)
-         VALUES (?, ?, 'pending')`,
-        ingredient.normalizedName,
-        ingredient.name,
-      );
-      await db.runAsync(
-        `INSERT INTO product_ingredients
-         (product_id, normalized_name, position, raw_name)
-         VALUES (?, ?, ?, ?)`,
-        product.id,
-        ingredient.normalizedName,
-        ingredient.position,
-        ingredient.name,
-      );
-    }
+      await replaceProductIngredients(db, product.id, draft.ingredientsText);
+    });
 
     return { product, created: true };
   }

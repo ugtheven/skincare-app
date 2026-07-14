@@ -52,13 +52,18 @@ const FUNCTION_TIMEOUT_MS = 12_000;
 async function withFunctionTimeout<T>(
   operation: (signal: AbortSignal) => Promise<T>,
   timeoutMs = FUNCTION_TIMEOUT_MS,
+  externalSignal?: AbortSignal,
 ) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const abort = () => controller.abort();
+  if (externalSignal?.aborted) controller.abort();
+  externalSignal?.addEventListener('abort', abort, { once: true });
   try {
     return await operation(controller.signal);
   } finally {
     clearTimeout(timeout);
+    externalSignal?.removeEventListener('abort', abort);
   }
 }
 
@@ -76,7 +81,10 @@ export type VisualLookupResult = {
 export type VisualLookupErrorCode =
   | 'authentication_required'
   | 'invalid_image'
+  | 'duplicate_request'
+  | 'global_quota_reached'
   | 'network_unavailable'
+  | 'rate_limited'
   | 'relay_unavailable'
   | 'request_timeout'
   | 'quota_reached'
@@ -127,7 +135,10 @@ async function visualLookupErrorCode(error: unknown) {
   const supported: VisualLookupErrorCode[] = [
     'authentication_required',
     'invalid_image',
+    'duplicate_request',
+    'global_quota_reached',
     'quota_reached',
+    'rate_limited',
     'disabled',
     'quota_not_configured',
     'quota_check_failed',
@@ -179,6 +190,7 @@ async function ensureAnonymousSession(supabase: SupabaseClient) {
 
 export async function lookupSharedProductByIdentifier(
   identifier: string,
+  options: { refreshOnly?: boolean } = {},
 ): Promise<ProductDraft | null | undefined> {
   const supabase = getClient();
   if (!supabase) return undefined;
@@ -186,7 +198,10 @@ export async function lookupSharedProductByIdentifier(
   await ensureAnonymousSession(supabase);
   const { data, error } = await withFunctionTimeout((signal) =>
     supabase.functions.invoke<LookupResponse>('product-lookup', {
-      body: { mode: 'identifier', value: identifier },
+      body: {
+        mode: options.refreshOnly ? 'identifier_refresh' : 'identifier',
+        value: identifier,
+      },
       signal,
     }),
   );
@@ -214,6 +229,10 @@ export async function lookupSharedProductByIdentifier(
     ingredientsSourceUrl: product.ingredientsSourceUrl ?? '',
     source: 'barcode',
   };
+}
+
+export async function refreshSharedProductByIdentifier(identifier: string) {
+  return lookupSharedProductByIdentifier(identifier, { refreshOnly: true });
 }
 
 export async function lookupSharedProductsByText(
@@ -257,12 +276,16 @@ export async function lookupSharedProductsByText(
   }));
 }
 
-export async function lookupProductsByVisualFallback(input: {
-  imageBase64: string;
-  mimeType: 'image/jpeg';
-  recognizedText: string;
-  identifier?: string;
-}): Promise<VisualLookupResult> {
+export async function lookupProductsByVisualFallback(
+  input: {
+    imageBase64: string;
+    mimeType: 'image/jpeg';
+    recognizedText: string;
+    requestId: string;
+    identifier?: string;
+  },
+  signal?: AbortSignal,
+): Promise<VisualLookupResult> {
   const supabase = getClient();
   if (!supabase) throw new Error('visual_lookup_unavailable');
 
@@ -281,7 +304,8 @@ export async function lookupProductsByVisualFallback(input: {
           'product-visual-lookup',
           { body: input, signal },
         ),
-      60_000,
+      40_000,
+      signal,
     );
   } catch (error) {
     throw new VisualLookupError(await visualLookupErrorCode(error));

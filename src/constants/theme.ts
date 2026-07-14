@@ -14,6 +14,12 @@ export const Colors = {
   separator: '#D8E1E8',
   tabBar: '#FFFFFF',
   imageOverlay: 'rgba(255, 255, 255, 0.62)',
+  cameraBackground: '#000000',
+  cameraScrim: 'rgba(0, 0, 0, 0.42)',
+  cameraScrimLight: 'rgba(0, 0, 0, 0.34)',
+  cameraOverlayStrong: 'rgba(0, 0, 0, 0.55)',
+  onTint: '#FFFFFF',
+  error: '#B42318',
 } as const;
 
 export type ThemeColor = keyof typeof Colors;

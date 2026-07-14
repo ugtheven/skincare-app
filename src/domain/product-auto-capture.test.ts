@@ -4,6 +4,7 @@ import {
   barcodeGuidanceStage,
   emptyAutoCaptureIdentifierLock,
   emptyAutoCaptureLock,
+  extractStrongPrintedGtin,
   extractValidGtin,
   isValidGtin,
 } from './product-auto-capture';
@@ -62,6 +63,28 @@ describe('printed product identifiers', () => {
     expect(
       extractValidGtin('CeraVe\n3612623028162\nCrème visage hydratante'),
     ).toBe('3612623028162');
+  });
+
+  it('accepts this centered high-confidence printed CeraVe code immediately', () => {
+    expect(
+      extractStrongPrintedGtin([
+        {
+          text: '3612623961421',
+          confidence: 1,
+          x: 0.452,
+          width: 0.153,
+        },
+      ]),
+    ).toBe('3612623961421');
+  });
+
+  it('keeps a low-confidence or off-center code behind the stability lock', () => {
+    expect(
+      extractStrongPrintedGtin([
+        { text: '3612623961421', confidence: 0.6, x: 0.45, width: 0.15 },
+        { text: '3612623961421', confidence: 1, x: 0.01, width: 0.08 },
+      ]),
+    ).toBeNull();
   });
 
   it('accepts separators inserted by OCR', () => {

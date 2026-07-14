@@ -14,6 +14,8 @@ The shared catalogue prevents every device from repeating the same external look
 6. Merge approved web results with weak catalogue candidates and ask the user to confirm.
 7. Enrich the confirmed product with a sourced packshot and INCI list. Missing enrichment never blocks saving.
 
+For a first barcode match, the confirmation form refreshes missing photo and ingredient fields in place while the initial free enrichment finishes. These refreshes are read-only: they do not restart normalization or call Google Vision/SerpApi, and they stop when the user leaves or saves.
+
 ## Safety rules
 
 - The mobile app has no direct access to shared tables.
@@ -32,8 +34,8 @@ The shared catalogue prevents every device from repeating the same external look
 2. Enable anonymous sign-ins and configure CAPTCHA for production.
 3. Set `OPEN_BEAUTY_FACTS_USER_AGENT` as an Edge Function secret.
 4. Apply `supabase db push` and deploy `product-lookup` plus `product-submission`.
-5. Set `GOOGLE_CLOUD_VISION_API_KEY`, `GOOGLE_VISUAL_LOOKUP_ENABLED`, and `VISUAL_LOOKUP_DAILY_USER_LIMIT` as Edge Function secrets.
-6. Deploy `product-visual-lookup`. Keep it single-user while the per-user quota is `0`; set a positive limit before public rollout.
+5. Configure Google Vision and SerpApi with independent kill switches plus positive per-user/day, global/day, and per-minute limits from `supabase/functions/.env.example`.
+6. Deploy `product-visual-lookup`. A zero limit blocks paid lookup outside the explicit development-only override. Before public rollout, also configure provider-side quotas, billing alerts, and Supabase CAPTCHA.
 7. Deploy the optional Cloud Run image normalizer from `services/product-image-normalizer` and configure its signed-job secret.
 8. Copy the project URL and publishable key into `.env.local` from `.env.example`.
 

@@ -1,14 +1,25 @@
-import { CameraView, useCameraPermissions } from 'expo-camera';
+import {
+  CameraView,
+  type BarcodeScanningResult,
+  useCameraPermissions,
+} from 'expo-camera';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Haptics from 'expo-haptics';
 import { Image } from 'expo-image';
-import { useNavigation } from 'expo-router';
+import { useFocusEffect } from 'expo-router';
 import { SymbolView, type SFSymbol } from 'expo-symbols';
+import {
+  createNativeStackNavigator,
+  type NativeStackScreenProps,
+} from '@react-navigation/native-stack';
+import { useIsFocused } from '@react-navigation/native';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   AccessibilityInfo,
   Animated,
+  FlatList,
+  Linking,
   Modal,
   Pressable,
   ScrollView,
@@ -19,6 +30,11 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import {
+  isLiveDataScannerSupported,
+  LiveDataScannerView,
+  type LiveDataScannerItem,
+} from '@/components/live-data-scanner';
 import {
   lookupOpenBeautyFactsByText,
   lookupProductByBarcode,
@@ -31,6 +47,8 @@ import {
 import { productRepository } from '@/data/sqlite-product-repository';
 import { routineRepository } from '@/data/sqlite-routine-repository';
 import {
+  barcodeDraftNeedsEnrichment,
+  mergeBarcodeEnrichment,
   recognizeProductBarcode,
   recognizeProductPhoto,
 } from '@/data/product-recognition-service';
@@ -38,6 +56,7 @@ import { recognizeProductWithVisualFallback } from '@/data/product-visual-fallba
 import {
   lookupSharedProductByIdentifier,
   lookupSharedProductsByText,
+  refreshSharedProductByIdentifier,
   submitConfirmedWebProduct,
   submitWrongProductGuess,
   VisualLookupError,
@@ -49,10 +68,15 @@ import {
   barcodeGuidanceStage,
   emptyAutoCaptureIdentifierLock,
   emptyAutoCaptureLock,
+  extractStrongPrintedGtin,
   extractValidGtin,
   type AutoCaptureLockStage,
 } from '@/domain/product-auto-capture';
 import { parseIngredientList } from '@/domain/product-ingredients';
+import {
+  itemIdsForSelectedObservations,
+  liveTextEvidence,
+} from '@/domain/live-data-scanner';
 import {
   emptyProductDraft,
   PRODUCT_CATEGORIES,
@@ -64,23 +88,33 @@ import {
   hasDecisiveCandidate,
   hasReliableCandidate,
   hasProductCandidateImage,
-  isProductCandidateComplete,
   manualDraftFromRecognizedText,
+  normalizeProductText,
   productLookupTextFromRecognizedText,
   selectProductCandidates,
   type ProductCandidate,
   type RecognizedProductTextLine,
 } from '@/domain/product-recognition';
+import {
+  barcodeHighlightRect,
+  identifierHighlightLines,
+  recognizedTextHighlightLines,
+  visionHighlightRect,
+  type ScannerRect,
+  type ScannerSize,
+} from '@/domain/scanner-highlights';
 import type { RoutineOccurrence } from '@/domain/routine';
 
 type Screen =
   | 'catalogue'
   | 'scanner'
+  | 'cloudConsent'
   | 'recognizing'
   | 'recognitionIssue'
   | 'candidates'
   | 'form'
-  | 'routine';
+  | 'detail'
+  | 'success';
 
 type PhotoRecognitionFallback = Extract<
   Awaited<ReturnType<typeof recognizeProductPhoto>>,
@@ -94,14 +128,65 @@ type RecognitionIssue = {
 
 type ScannerMode = 'barcode' | 'front';
 
+type ScannerHighlight = {
+  id: string;
+  rect: ScannerRect;
+  tone: 'detected' | 'confirmed';
+};
+
+// Keep confirmed geometry on screen long enough to be perceived before lookup.
+const SCAN_SUCCESS_HOLD_MS = 650;
+const LIVE_SCANNER_EVALUATION_MS = 400;
+const LIVE_BARCODE_FALLBACK_MS = 7500;
+const CAMERA_HANDOFF_SETTLE_MS = 300;
+const CAMERA_CAPTURE_RETRY_MS = 220;
+const CAMERA_CAPTURE_ATTEMPTS = 3;
+const CAMERA_READY_TIMEOUT_MS = 2500;
+
+type ProductsStackParamList = {
+  Catalogue: undefined;
+  Workflow: {
+    initialScreen: Exclude<Screen, 'catalogue'>;
+    draft?: ProductDraft;
+    notice?: string | null;
+    product?: Product;
+    nonce: number;
+  };
+};
+
+type ProductsExperienceProps =
+  | NativeStackScreenProps<ProductsStackParamList, 'Catalogue'>
+  | NativeStackScreenProps<ProductsStackParamList, 'Workflow'>;
+
+const ProductsStack = createNativeStackNavigator<ProductsStackParamList>();
+
 export default function ProductsScreen() {
+  return (
+    <ProductsStack.Navigator screenOptions={{ headerShown: false }}>
+      <ProductsStack.Screen name="Catalogue" component={ProductsExperience} />
+      <ProductsStack.Screen
+        name="Workflow"
+        component={ProductsExperience}
+        options={{ gestureEnabled: true }}
+      />
+    </ProductsStack.Navigator>
+  );
+}
+
+function ProductsExperience({ route, navigation }: ProductsExperienceProps) {
   const colors = Colors;
   const insets = useSafeAreaInsets();
-  const navigation = useNavigation();
-  const [screen, setScreen] = useState<Screen>('catalogue');
+  const workflowParams = route.name === 'Workflow' ? route.params : null;
+  const [screen, setScreen] = useState<Screen>(
+    workflowParams?.initialScreen ?? 'catalogue',
+  );
   const [products, setProducts] = useState<Product[]>([]);
-  const [draft, setDraft] = useState<ProductDraft>(emptyProductDraft);
-  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
+  const [draft, setDraft] = useState<ProductDraft>(
+    workflowParams?.draft ?? emptyProductDraft,
+  );
+  const [selectedProduct, setSelectedProduct] = useState<Product | null>(
+    workflowParams?.product ?? null,
+  );
   const [candidates, setCandidates] = useState<ProductCandidate[]>([]);
   const [recognizedText, setRecognizedText] = useState('');
   const [pendingIdentifier, setPendingIdentifier] = useState<string | null>(
@@ -119,14 +204,54 @@ export default function ProductsScreen() {
   const [routine, setRoutine] = useState<RoutineOccurrence | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isLookingUp, setIsLookingUp] = useState(false);
+  const [isEnriching, setIsEnriching] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(
+    workflowParams?.notice ?? null,
+  );
   const [formError, setFormError] = useState<string | null>(null);
   const [pendingFallback, setPendingFallback] =
     useState<PhotoRecognitionFallback | null>(null);
+  const [pendingObservations, setPendingObservations] = useState<
+    RecognizedProductTextLine[]
+  >([]);
   const [recognitionIssue, setRecognitionIssue] =
     useState<RecognitionIssue | null>(null);
   const recognitionSessionRef = useRef(0);
+  const visualLookupAbortRef = useRef<AbortController | null>(null);
+  const capturedImageUriRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    capturedImageUriRef.current = capturedImageUri;
+  }, [capturedImageUri]);
+
+  useEffect(
+    () => () => {
+      recognitionSessionRef.current += 1;
+      visualLookupAbortRef.current?.abort();
+      const uri = capturedImageUriRef.current;
+      if (uri) {
+        void FileSystem.deleteAsync(uri, { idempotent: true }).catch(
+          () => undefined,
+        );
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const announcements: Partial<Record<Screen, string>> = {
+      cloudConsent: 'Autorisation requise pour la recherche avec Google',
+      candidates: 'Résultats de reconnaissance disponibles',
+      detail: 'Fiche produit ouverte',
+      recognitionIssue: 'La reconnaissance a rencontré un problème',
+      success: 'Produit enregistré',
+    };
+    const announcement = announcements[screen];
+    if (announcement) {
+      void AccessibilityInfo.announceForAccessibility(announcement);
+    }
+  }, [screen]);
 
   const loadProducts = useCallback(async () => {
     setIsLoading(true);
@@ -140,16 +265,34 @@ export default function ProductsScreen() {
     }
   }, []);
 
-  useEffect(() => {
-    void loadProducts();
-  }, [loadProducts]);
+  useFocusEffect(
+    useCallback(() => {
+      void loadProducts();
+    }, [loadProducts]),
+  );
 
-  useEffect(() => {
-    navigation.setOptions({
-      tabBarStyle: screen === 'catalogue' ? undefined : { display: 'none' },
-    });
-    return () => navigation.setOptions({ tabBarStyle: undefined });
-  }, [navigation, screen]);
+  useFocusEffect(
+    useCallback(() => {
+      const tabsNavigation = navigation.getParent()?.getParent();
+      tabsNavigation?.setOptions({
+        tabBarStyle: screen === 'catalogue' ? undefined : { display: 'none' },
+      });
+      return () => tabsNavigation?.setOptions({ tabBarStyle: undefined });
+    }, [navigation, screen]),
+  );
+
+  const closeFlow = useCallback(() => {
+    recognitionSessionRef.current += 1;
+    visualLookupAbortRef.current?.abort();
+    visualLookupAbortRef.current = null;
+    setIsLookingUp(false);
+    setIsEnriching(false);
+    if (route.name === 'Workflow' && navigation.canGoBack()) {
+      navigation.goBack();
+      return;
+    }
+    setScreen('catalogue');
+  }, [navigation, route.name]);
 
   useEffect(() => {
     if (screen !== 'catalogue' || !capturedImageUri) return;
@@ -164,7 +307,17 @@ export default function ProductsScreen() {
     prefilledDraft: ProductDraft = emptyProductDraft,
     notice: string | null = null,
   ) => {
+    if (route.name === 'Catalogue') {
+      navigation.navigate('Workflow', {
+        initialScreen: 'form',
+        draft: prefilledDraft,
+        notice,
+        nonce: Date.now(),
+      });
+      return;
+    }
     recognitionSessionRef.current += 1;
+    setIsEnriching(false);
     setPendingIdentifier(null);
     setScannerInitialMode('barcode');
     setDraft(prefilledDraft);
@@ -193,7 +346,15 @@ export default function ProductsScreen() {
   };
 
   const openScanner = () => {
+    if (route.name === 'Catalogue') {
+      navigation.navigate('Workflow', {
+        initialScreen: 'scanner',
+        nonce: Date.now(),
+      });
+      return;
+    }
     recognitionSessionRef.current += 1;
+    setIsEnriching(false);
     setCapturedImageUri(null);
     setRecognizedText('');
     setPendingIdentifier(null);
@@ -201,6 +362,7 @@ export default function ProductsScreen() {
     setCandidates([]);
     setMessage(null);
     setPendingFallback(null);
+    setPendingObservations([]);
     setRecognitionIssue(null);
     setRecognitionMode('local');
     setScreen('scanner');
@@ -210,6 +372,7 @@ export default function ProductsScreen() {
     imageUri: string,
     preRecognized?: RecognizedPackagingText,
   ) => {
+    const sessionId = recognitionSessionRef.current;
     const recognizedObservations = preRecognized?.observations ?? [];
     setCapturedImageUri(imageUri);
     setCandidates([]);
@@ -251,6 +414,7 @@ export default function ProductsScreen() {
       searchShared: lookupSharedProductsByText,
       searchPublic: lookupOpenBeautyFactsByText,
     });
+    if (sessionId !== recognitionSessionRef.current) return;
     setRecognizedText(result.recognizedText);
 
     if (
@@ -260,58 +424,22 @@ export default function ProductsScreen() {
       const displayableCandidates = result.candidates.filter(
         hasProductCandidateImage,
       );
-      const complete = displayableCandidates[0]
-        ? isProductCandidateComplete(displayableCandidates[0])
-        : false;
       if (!hasReliableCandidate(displayableCandidates)) {
-        await runVisualEnrichment(
-          result,
-          imageUri,
-          false,
-          undefined,
-          recognizedObservations,
-        );
+        setPendingFallback(result);
+        setPendingObservations(recognizedObservations);
+        setScreen('cloudConsent');
         return;
       }
       setCandidates(displayableCandidates);
-      setMessage(
-        complete
-          ? 'Produit reconnu dans le catalogue partagé.'
-          : 'Produit reconnu. La fiche se complète en arrière-plan.',
-      );
+      setMessage('Produit reconnu dans le catalogue partagé.');
       setScreen('candidates');
-      if (!complete && FileSystem.cacheDirectory) {
-        const sessionId = recognitionSessionRef.current;
-        const enrichmentImageUri = `${FileSystem.cacheDirectory}product-enrichment-${Date.now()}.jpg`;
-        try {
-          await FileSystem.copyAsync({
-            from: imageUri,
-            to: enrichmentImageUri,
-          });
-          void runVisualEnrichment(
-            result,
-            enrichmentImageUri,
-            true,
-            sessionId,
-            recognizedObservations,
-          );
-        } catch {
-          setMessage(
-            'Produit reconnu. La fiche pourra être complétée plus tard.',
-          );
-        }
-      }
       return;
     }
 
     if (result.kind === 'fallback_required') {
-      await runVisualEnrichment(
-        result,
-        imageUri,
-        false,
-        undefined,
-        recognizedObservations,
-      );
+      setPendingFallback(result);
+      setPendingObservations(recognizedObservations);
+      setScreen('cloudConsent');
       return;
     }
 
@@ -335,6 +463,9 @@ export default function ProductsScreen() {
     backgroundSessionId?: number,
     recognizedObservations: RecognizedProductTextLine[] = [],
   ) => {
+    const sessionId = recognitionSessionRef.current;
+    const controller = background ? null : new AbortController();
+    if (controller) visualLookupAbortRef.current = controller;
     if (!background) {
       setPendingFallback(fallback);
       setRecognitionIssue(null);
@@ -355,8 +486,12 @@ export default function ProductsScreen() {
         visualLookupText,
         recognizedObservations,
         pendingIdentifier ?? undefined,
+        controller?.signal,
       );
-      if (background && backgroundSessionId !== recognitionSessionRef.current) {
+      if (
+        sessionId !== recognitionSessionRef.current ||
+        (background && backgroundSessionId !== recognitionSessionRef.current)
+      ) {
         return;
       }
       const webCandidates = visualResult.candidates;
@@ -396,7 +531,10 @@ export default function ProductsScreen() {
       });
       setScreen('recognitionIssue');
     } catch (error) {
-      if (background && backgroundSessionId !== recognitionSessionRef.current) {
+      if (
+        sessionId !== recognitionSessionRef.current ||
+        (background && backgroundSessionId !== recognitionSessionRef.current)
+      ) {
         return;
       }
       if (background) {
@@ -408,31 +546,53 @@ export default function ProductsScreen() {
       const errorCode =
         error instanceof VisualLookupError ? error.code : 'unknown';
       const quotaReached = errorCode === 'quota_reached';
+      const serviceBusy =
+        errorCode === 'global_quota_reached' ||
+        errorCode === 'rate_limited' ||
+        errorCode === 'duplicate_request';
       const sessionExpired = errorCode === 'authentication_required';
       const invalidImage = errorCode === 'invalid_image';
       const requestTimeout = errorCode === 'request_timeout';
+      const providerUnavailable = [
+        'disabled',
+        'network_unavailable',
+        'provider_failed',
+        'provider_unavailable',
+        'quota_check_failed',
+        'quota_not_configured',
+        'relay_unavailable',
+        'visual_lookup_unavailable',
+      ].includes(errorCode);
       if (__DEV__) {
         console.warn(`[product-visual-lookup] ${errorCode}`);
       }
       setRecognitionIssue({
         title: quotaReached
           ? 'Limite de recherche atteinte'
-          : sessionExpired
-            ? 'Session réinitialisée'
-            : invalidImage
-              ? 'Photo difficile à transmettre'
-              : requestTimeout
-                ? 'Recherche de photo trop longue'
-                : 'Recherche de photo interrompue',
+          : serviceBusy
+            ? 'Recherche temporairement limitée'
+            : sessionExpired
+              ? 'Session réinitialisée'
+              : invalidImage
+                ? 'Photo difficile à transmettre'
+                : requestTimeout
+                  ? 'Recherche de photo trop longue'
+                  : providerUnavailable
+                    ? 'Recherche produit indisponible'
+                    : 'Recherche de photo interrompue',
         message: quotaReached
-          ? 'Les 10 recherches autorisées aujourd’hui ont été utilisées. Réessaie plus tard, ou saisis ce produit manuellement.'
-          : sessionExpired
-            ? 'La remise à zéro a invalidé l’ancienne session. Réessaie : l’app vient d’en créer une nouvelle.'
-            : invalidImage
-              ? 'La photo n’a pas pu être préparée. Replace le produit dans le cadre puis réessaie.'
-              : requestTimeout
-                ? 'Le service a dépassé une minute malgré une seconde tentative automatique. Réessaie.'
-                : 'La fiche ne sera pas ajoutée sans photo. Le service a rencontré une erreur temporaire ; réessaie.',
+          ? 'La limite de recherche du jour est atteinte. Réessaie plus tard, ou saisis ce produit manuellement.'
+          : serviceBusy
+            ? 'Le service protège actuellement son budget. Réessaie plus tard, ou saisis ce produit manuellement.'
+            : sessionExpired
+              ? 'La remise à zéro a invalidé l’ancienne session. Réessaie : l’app vient d’en créer une nouvelle.'
+              : invalidImage
+                ? 'La photo n’a pas pu être préparée. Replace le produit dans le cadre puis réessaie.'
+                : requestTimeout
+                  ? 'Le service met trop de temps à répondre. Réessaie plus tard ou saisis le produit.'
+                  : providerUnavailable
+                    ? 'Le service de recherche n’est pas disponible actuellement. Le produit n’est pas considéré comme inconnu.'
+                    : 'La recherche a été interrompue. Réessaie plus tard ou saisis le produit.',
       });
       setScreen('recognitionIssue');
     } finally {
@@ -442,7 +602,21 @@ export default function ProductsScreen() {
         );
       }
       setRecognitionMode('local');
+      if (visualLookupAbortRef.current === controller) {
+        visualLookupAbortRef.current = null;
+      }
     }
+  };
+
+  const cancelRecognition = () => {
+    recognitionSessionRef.current += 1;
+    visualLookupAbortRef.current?.abort();
+    visualLookupAbortRef.current = null;
+    setPendingFallback(null);
+    setPendingObservations([]);
+    setIsLookingUp(false);
+    void discardCapturedImage();
+    closeFlow();
   };
 
   const confirmCandidate = async (candidate: ProductCandidate) => {
@@ -466,21 +640,48 @@ export default function ProductsScreen() {
         setSelectedProduct(product);
         setRoutine(await routineRepository.getCurrentOccurrence(new Date()));
         setMessage('Ce produit est déjà dans ton catalogue.');
-        setScreen('routine');
+        setScreen('success');
         return;
       }
     }
 
-    if (candidate.source === 'google-web') {
-      void submitConfirmedWebProduct(
-        candidate,
-        recognizedText,
-        pendingIdentifier ?? undefined,
-      ).catch(() => undefined);
+    const candidateDraft = withPendingIdentifier(candidateToDraft(candidate));
+    if (!candidateDraft.name.trim() || !candidateDraft.category.trim()) {
+      await discardCapturedImage();
+      openManualForm(candidateDraft);
+      return;
     }
 
-    await discardCapturedImage();
-    openManualForm(withPendingIdentifier(candidateToDraft(candidate)));
+    setIsSaving(true);
+    try {
+      const result = await productRepository.saveProduct(candidateDraft);
+      if (candidate.source === 'google-web') {
+        void submitConfirmedWebProduct(
+          candidate,
+          recognizedText,
+          pendingIdentifier ?? undefined,
+        ).catch(() => undefined);
+      }
+      await discardCapturedImage();
+      setSelectedProduct(result.product);
+      setRoutine(await routineRepository.getCurrentOccurrence(new Date()));
+      setMessage(
+        result.created
+          ? 'Le produit est enregistré.'
+          : 'Ce produit était déjà dans ton catalogue.',
+      );
+      setScreen('success');
+      void AccessibilityInfo.announceForAccessibility('Produit enregistré');
+    } catch {
+      setRecognitionIssue({
+        title: 'Enregistrement impossible',
+        message:
+          'Le produit a été reconnu, mais il n’a pas pu être enregistré.',
+      });
+      setScreen('recognitionIssue');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const reportWrongCandidate = async (candidate: ProductCandidate) => {
@@ -503,7 +704,42 @@ export default function ProductsScreen() {
     }
   };
 
+  const refreshBarcodeEnrichment = async (
+    identifier: string,
+    sessionId: number,
+  ) => {
+    const delays = [1_200, 2_500, 4_500, 8_000];
+    setIsEnriching(true);
+    setMessage(null);
+
+    try {
+      for (const delay of delays) {
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        if (sessionId !== recognitionSessionRef.current) return;
+
+        const refreshed = await refreshSharedProductByIdentifier(
+          identifier,
+        ).catch(() => undefined);
+        if (sessionId !== recognitionSessionRef.current) return;
+        if (!refreshed) continue;
+
+        setDraft((current) => mergeBarcodeEnrichment(current, refreshed));
+        if (!barcodeDraftNeedsEnrichment(refreshed)) {
+          setMessage('Photo et ingrédients ajoutés à cette fiche.');
+          void AccessibilityInfo.announceForAccessibility(
+            'Photo et ingrédients ajoutés',
+          );
+          return;
+        }
+      }
+      if (sessionId === recognitionSessionRef.current) setMessage(null);
+    } finally {
+      if (sessionId === recognitionSessionRef.current) setIsEnriching(false);
+    }
+  };
+
   const handleScannedCode = async (rawValue: string) => {
+    const sessionId = recognitionSessionRef.current;
     const identifier = rawValue.trim();
     if (!identifier) return;
 
@@ -522,6 +758,7 @@ export default function ProductsScreen() {
       lookupShared: lookupSharedProductByIdentifier,
       lookupPublic: lookupProductByBarcode,
     });
+    if (sessionId !== recognitionSessionRef.current) return;
 
     if (result.kind === 'local') {
       const existing = result.product;
@@ -544,17 +781,25 @@ export default function ProductsScreen() {
       setMessage('Ce produit est déjà dans ton catalogue.');
       setPendingIdentifier(null);
       setScannerInitialMode('barcode');
-      setScreen('form');
+      setRoutine(await routineRepository.getCurrentOccurrence(new Date()));
+      setScreen('success');
     } else if (result.kind === 'draft') {
       setDraft({ ...result.draft, barcode: identifier, source: 'barcode' });
       setPendingIdentifier(null);
       setScannerInitialMode('barcode');
       setScreen('form');
+      setIsLookingUp(false);
+      if (
+        result.provider === 'shared' &&
+        barcodeDraftNeedsEnrichment(result.draft)
+      ) {
+        void refreshBarcodeEnrichment(identifier, sessionId);
+      }
     } else {
       setScannerInitialMode('front');
       setScreen('scanner');
     }
-    setIsLookingUp(false);
+    if (result.kind !== 'draft') setIsLookingUp(false);
   };
 
   const saveProduct = async () => {
@@ -568,6 +813,8 @@ export default function ProductsScreen() {
     }
 
     setIsSaving(true);
+    recognitionSessionRef.current += 1;
+    setIsEnriching(false);
     setFormError(null);
     try {
       const result = await productRepository.saveProduct(draft);
@@ -579,7 +826,8 @@ export default function ProductsScreen() {
           : 'Ce produit était déjà dans ton catalogue.',
       );
       setRoutine(await routineRepository.getCurrentOccurrence(new Date()));
-      setScreen('routine');
+      setScreen('success');
+      void AccessibilityInfo.announceForAccessibility('Produit enregistré');
     } catch {
       setFormError('Impossible d’enregistrer ce produit. Réessaie.');
     } finally {
@@ -600,7 +848,7 @@ export default function ProductsScreen() {
       const successMessage = `${selectedProduct.name} a été ajouté à ${routine.routine.name}.`;
       await loadProducts();
       setMessage(successMessage);
-      setScreen('catalogue');
+      setRoutine(null);
     } catch {
       setMessage(
         'Le produit est enregistré, mais pas encore ajouté à la routine.',
@@ -615,10 +863,11 @@ export default function ProductsScreen() {
       <ScannerScreen
         detectedIdentifier={pendingIdentifier}
         initialMode={scannerInitialMode}
+        key={`${scannerInitialMode}:${pendingIdentifier ?? 'new'}`}
         onCancel={() => {
           setPendingIdentifier(null);
           setScannerInitialMode('barcode');
-          setScreen('catalogue');
+          closeFlow();
         }}
         onScanned={(value) => void handleScannedCode(value)}
         onCaptured={(uri, recognized) =>
@@ -642,7 +891,35 @@ export default function ProductsScreen() {
 
   if (screen === 'recognizing') {
     return (
-      <RecognitionProgress imageUri={capturedImageUri} mode={recognitionMode} />
+      <RecognitionProgress
+        imageUri={capturedImageUri}
+        mode={recognitionMode}
+        onCancel={cancelRecognition}
+      />
+    );
+  }
+
+  if (screen === 'cloudConsent' && pendingFallback && capturedImageUri) {
+    return (
+      <CloudConsentScreen
+        imageUri={capturedImageUri}
+        onCancel={cancelRecognition}
+        onContinue={() =>
+          void runVisualEnrichment(
+            pendingFallback,
+            capturedImageUri,
+            false,
+            undefined,
+            pendingObservations,
+          )
+        }
+        onManual={() =>
+          openManualForm(
+            withPendingIdentifier(pendingFallback.draft),
+            'Ajout manuel : vérifie les informations reconnues.',
+          )
+        }
+      />
     );
   }
 
@@ -651,10 +928,7 @@ export default function ProductsScreen() {
       <RecognitionIssueScreen
         imageUri={capturedImageUri}
         issue={recognitionIssue}
-        onCancel={() => {
-          recognitionSessionRef.current += 1;
-          setScreen('catalogue');
-        }}
+        onCancel={closeFlow}
         onManual={() =>
           openManualForm(
             withPendingIdentifier(
@@ -680,12 +954,10 @@ export default function ProductsScreen() {
       <CandidateSelection
         backgroundImageUri={capturedImageUri}
         candidates={candidates}
+        isSaving={isSaving}
         message={message}
         reportingCandidateId={reportingCandidateId}
-        onCancel={() => {
-          recognitionSessionRef.current += 1;
-          setScreen('catalogue');
-        }}
+        onCancel={closeFlow}
         onConfirm={(candidate) => void confirmCandidate(candidate)}
         onManual={() =>
           openManualForm(
@@ -706,29 +978,34 @@ export default function ProductsScreen() {
         draft={draft}
         previewImageUri={draft.imageUrl}
         isLookingUp={isLookingUp}
+        isEnriching={isEnriching}
         isSaving={isSaving}
         message={message}
         error={formError}
         onChange={(key, value) =>
           setDraft((current) => ({ ...current, [key]: value }))
         }
-        onCancel={() => setScreen('catalogue')}
+        onCancel={closeFlow}
         onSave={() => void saveProduct()}
       />
     );
   }
 
-  if (screen === 'routine') {
+  if (screen === 'detail' && selectedProduct) {
+    return <ProductDetail product={selectedProduct} onBack={closeFlow} />;
+  }
+
+  if (screen === 'success') {
     return (
-      <RoutineAssociation
+      <ProductSuccess
         product={selectedProduct}
         routine={routine}
         isSaving={isSaving}
         message={message}
         onAdd={() => void addToRoutine()}
-        onSkip={async () => {
+        onDone={async () => {
           await loadProducts();
-          setScreen('catalogue');
+          closeFlow();
         }}
       />
     );
@@ -736,55 +1013,68 @@ export default function ProductsScreen() {
 
   return (
     <View style={[styles.screen, { backgroundColor: colors.background }]}>
-      <ScrollView
+      <FlatList
+        data={products}
+        keyExtractor={(product) => product.id}
         contentContainerStyle={[
           styles.catalogue,
           { paddingTop: insets.top + 24 },
         ]}
-        showsVerticalScrollIndicator={false}
-      >
-        <Text style={[styles.largeTitle, { color: colors.text }]}>
-          Produits
-        </Text>
-        <Text style={[styles.intro, { color: colors.textSecondary }]}>
-          Retrouve les produits que tu utilises.
-        </Text>
-
-        {message ? <Notice message={message} /> : null}
-
-        {isLoading ? (
-          <View style={styles.loadingBlock}>
-            <ActivityIndicator color={colors.tint} />
-            <Text style={[styles.loadingText, { color: colors.textSecondary }]}>
-              Chargement…
+        ListHeaderComponent={
+          <View style={styles.catalogueHeader}>
+            <Text style={[styles.largeTitle, { color: colors.text }]}>
+              Produits
             </Text>
+            <Text style={[styles.intro, { color: colors.textSecondary }]}>
+              Retrouve les produits que tu utilises.
+            </Text>
+            {message ? <Notice message={message} /> : null}
           </View>
-        ) : products.length === 0 ? (
-          <View style={styles.emptyState}>
-            <View
-              style={[
-                styles.emptyIcon,
-                { backgroundColor: colors.backgroundSelected },
-              ]}
-            >
-              <AppSymbol name="shippingbox" color={colors.tint} size={31} />
+        }
+        ListEmptyComponent={
+          isLoading ? (
+            <View style={styles.loadingBlock}>
+              <ActivityIndicator color={colors.tint} />
+              <Text
+                style={[styles.loadingText, { color: colors.textSecondary }]}
+              >
+                Chargement…
+              </Text>
             </View>
-            <Text style={[styles.emptyTitle, { color: colors.text }]}>
-              Ton catalogue commence ici.
-            </Text>
-            <Text style={[styles.emptyBody, { color: colors.textSecondary }]}>
-              Scanne un produit ou ajoute-le à la main. Tu pourras ensuite le
-              placer dans ta routine.
-            </Text>
-          </View>
-        ) : (
-          <View style={styles.productList}>
-            {products.map((product) => (
-              <ProductRow key={product.id} product={product} />
-            ))}
-          </View>
+          ) : (
+            <View style={styles.emptyState}>
+              <View
+                style={[
+                  styles.emptyIcon,
+                  { backgroundColor: colors.backgroundSelected },
+                ]}
+              >
+                <AppSymbol name="shippingbox" color={colors.tint} size={31} />
+              </View>
+              <Text style={[styles.emptyTitle, { color: colors.text }]}>
+                Ton catalogue commence ici.
+              </Text>
+              <Text style={[styles.emptyBody, { color: colors.textSecondary }]}>
+                Scanne un produit ou ajoute-le à la main. Tu pourras ensuite le
+                placer dans ta routine.
+              </Text>
+            </View>
+          )
+        }
+        renderItem={({ item: product }) => (
+          <ProductRow
+            product={product}
+            onPress={() => {
+              navigation.navigate('Workflow', {
+                initialScreen: 'detail',
+                product,
+                nonce: Date.now(),
+              });
+            }}
+          />
         )}
-      </ScrollView>
+        showsVerticalScrollIndicator={false}
+      />
 
       <View
         style={[
@@ -804,7 +1094,11 @@ export default function ProductsScreen() {
             { backgroundColor: colors.tint, opacity: pressed ? 0.86 : 1 },
           ]}
         >
-          <AppSymbol name="barcode.viewfinder" color="#FFFFFF" size={21} />
+          <AppSymbol
+            name="barcode.viewfinder"
+            color={colors.onTint}
+            size={21}
+          />
           <Text style={styles.primaryButtonText}>Scanner un produit</Text>
         </Pressable>
         <Pressable
@@ -825,7 +1119,100 @@ export default function ProductsScreen() {
   );
 }
 
-function ScannerScreen({
+function scannerHighlightsFromText(
+  lines: RecognizedProductTextLine[],
+  image: ScannerSize,
+  viewport: ScannerSize,
+  tone: ScannerHighlight['tone'],
+): ScannerHighlight[] {
+  const occurrences = new Map<string, number>();
+
+  return lines.flatMap((line) => {
+    const rect = visionHighlightRect(line, image, viewport);
+    if (!rect) return [];
+
+    const normalizedText = normalizeProductText(line.text) || 'text';
+    const occurrence = occurrences.get(normalizedText) ?? 0;
+    occurrences.set(normalizedText, occurrence + 1);
+    return [
+      {
+        id: `text-${normalizedText}-${occurrence}`,
+        rect,
+        tone,
+      },
+    ];
+  });
+}
+
+function ScannerHighlightBox({
+  highlight,
+  reduceMotion,
+}: {
+  highlight: ScannerHighlight;
+  reduceMotion: boolean;
+}) {
+  const values = useRef({
+    height: new Animated.Value(highlight.rect.height),
+    left: new Animated.Value(highlight.rect.left),
+    opacity: new Animated.Value(
+      reduceMotion || highlight.tone === 'confirmed' ? 1 : 0,
+    ),
+    top: new Animated.Value(highlight.rect.top),
+    width: new Animated.Value(highlight.rect.width),
+  }).current;
+
+  useEffect(() => {
+    const nextValues = [
+      [values.left, highlight.rect.left],
+      [values.top, highlight.rect.top],
+      [values.width, highlight.rect.width],
+      [values.height, highlight.rect.height],
+      [values.opacity, 1],
+    ] as const;
+
+    if (reduceMotion) {
+      nextValues.forEach(([value, next]) => value.setValue(next));
+      return;
+    }
+
+    Animated.parallel(
+      nextValues.map(([value, toValue]) =>
+        Animated.timing(value, {
+          duration: 180,
+          toValue,
+          useNativeDriver: false,
+        }),
+      ),
+    ).start();
+  }, [highlight.rect, reduceMotion, values]);
+
+  const confirmed = highlight.tone === 'confirmed';
+  return (
+    <Animated.View
+      testID={`scanner-highlight-${highlight.id}`}
+      style={[
+        styles.scannerHighlight,
+        {
+          backgroundColor: confirmed
+            ? 'rgba(10, 124, 145, 0.28)'
+            : 'rgba(10, 124, 145, 0.16)',
+          height: values.height,
+          left: values.left,
+          opacity: values.opacity,
+          top: values.top,
+          width: values.width,
+        },
+      ]}
+    >
+      <View
+        testID={`scanner-highlight-${highlight.id}-inner`}
+        style={styles.scannerHighlightInner}
+      />
+    </Animated.View>
+  );
+}
+
+export function ScannerScreen({
   detectedIdentifier,
   initialMode,
   onCancel,
@@ -842,25 +1229,195 @@ function ScannerScreen({
 }) {
   const colors = Colors;
   const insets = useSafeAreaInsets();
+  const isFocused = useIsFocused();
   const cameraRef = useRef<CameraView>(null);
   const [permission, requestPermission] = useCameraPermissions();
   const recognitionAvailable = isOnDeviceTextRecognitionAvailable();
+  const liveScannerSupported = isLiveDataScannerSupported();
   const [cameraReady, setCameraReady] = useState(false);
   const [scanMode, setScanMode] = useState<ScannerMode>(initialMode);
   const [barcodeProbeAttempts, setBarcodeProbeAttempts] = useState(0);
   const [lockStage, setLockStage] = useState<AutoCaptureLockStage>(0);
   const [captureError, setCaptureError] = useState<string | null>(null);
+  const [liveScannerFailed, setLiveScannerFailed] = useState(false);
+  const [liveHighlightedItemIds, setLiveHighlightedItemIds] = useState<
+    string[]
+  >([]);
+  const [liveConfirmed, setLiveConfirmed] = useState(false);
+  const [liveCapture, setLiveCapture] =
+    useState<RecognizedPackagingText | null>(null);
   const [reduceMotion, setReduceMotion] = useState(false);
+  const [previewSize, setPreviewSize] = useState<ScannerSize>({
+    height: 0,
+    width: 0,
+  });
+  const [highlights, setHighlights] = useState<ScannerHighlight[]>([]);
   const busyRef = useRef(false);
+  const initialModeRef = useRef(initialMode);
+  const liveCaptureStartedRef = useRef(false);
+  const latestLiveItemsRef = useRef<LiveDataScannerItem[]>([]);
   const scanModeRef = useRef<ScannerMode>(initialMode);
   const guidanceOpacity = useRef(new Animated.Value(1)).current;
   const identifierLockRef = useRef(emptyAutoCaptureIdentifierLock);
   const latestRecognizedRef = useRef<RecognizedPackagingText | null>(null);
   const lockRef = useRef(emptyAutoCaptureLock);
+  const successTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const useLiveScanner = liveScannerSupported && !liveScannerFailed;
+
+  useEffect(() => {
+    if (initialModeRef.current === initialMode) return;
+    initialModeRef.current = initialMode;
+    if (successTimerRef.current) {
+      clearTimeout(successTimerRef.current);
+      successTimerRef.current = null;
+    }
+    busyRef.current = false;
+    liveCaptureStartedRef.current = false;
+    latestLiveItemsRef.current = [];
+    latestRecognizedRef.current = null;
+    identifierLockRef.current = emptyAutoCaptureIdentifierLock;
+    lockRef.current = emptyAutoCaptureLock;
+    scanModeRef.current = initialMode;
+    setBarcodeProbeAttempts(0);
+    setCaptureError(null);
+    setHighlights([]);
+    setLiveCapture(null);
+    setLiveConfirmed(false);
+    setLiveHighlightedItemIds([]);
+    setLockStage(0);
+    setScanMode(initialMode);
+  }, [initialMode]);
 
   const barcodeGuidance = barcodeGuidanceStage(barcodeProbeAttempts);
   const guidanceKey =
-    scanMode === 'barcode' ? barcodeGuidance : `front-${lockStage}`;
+    scanMode === 'barcode'
+      ? lockStage === 3
+        ? 'barcode-success'
+        : barcodeGuidance
+      : `front-${lockStage}`;
+
+  const finishIdentifierScan = useCallback(
+    (value: string, nextHighlights: ScannerHighlight[]) => {
+      if (busyRef.current) return;
+      busyRef.current = true;
+      setHighlights(
+        nextHighlights.map((highlight) => ({
+          ...highlight,
+          tone: 'confirmed',
+        })),
+      );
+      setLockStage(3);
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      successTimerRef.current = setTimeout(
+        () => onScanned(value),
+        SCAN_SUCCESS_HOLD_MS,
+      );
+    },
+    [onScanned],
+  );
+
+  const finishProductScan = useCallback(
+    (
+      uri: string,
+      recognized: RecognizedPackagingText,
+      nextHighlights: ScannerHighlight[],
+    ) => {
+      if (busyRef.current) return;
+      busyRef.current = true;
+      setHighlights(
+        nextHighlights.map((highlight) => ({
+          ...highlight,
+          tone: 'confirmed',
+        })),
+      );
+      setLockStage(3);
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      successTimerRef.current = setTimeout(
+        () => onCaptured(uri, recognized),
+        SCAN_SUCCESS_HOLD_MS,
+      );
+    },
+    [onCaptured],
+  );
+
+  const finishLiveProductScan = useCallback(
+    (recognized: RecognizedPackagingText, itemIds: string[]) => {
+      if (busyRef.current) return;
+      busyRef.current = true;
+      setLiveHighlightedItemIds(itemIds);
+      setLiveConfirmed(true);
+      setLockStage(3);
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      successTimerRef.current = setTimeout(() => {
+        setCameraReady(false);
+        setLiveCapture(recognized);
+      }, SCAN_SUCCESS_HOLD_MS);
+    },
+    [],
+  );
+
+  const fallBackFromLiveCapture = useCallback(() => {
+    busyRef.current = false;
+    liveCaptureStartedRef.current = false;
+    lockRef.current = emptyAutoCaptureLock;
+    setLiveCapture(null);
+    setLiveConfirmed(false);
+    setLiveHighlightedItemIds([]);
+    setLiveScannerFailed(true);
+    setLockStage(0);
+    setCaptureError(
+      'La photo automatique reprend avec le scan standard. Garde le produit dans le cadre.',
+    );
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (successTimerRef.current) clearTimeout(successTimerRef.current);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!liveCapture || !cameraReady || liveCaptureStartedRef.current) return;
+
+    let cancelled = false;
+    liveCaptureStartedRef.current = true;
+    const wait = (duration: number) =>
+      new Promise<void>((resolve) => setTimeout(resolve, duration));
+    const capture = async () => {
+      await wait(CAMERA_HANDOFF_SETTLE_MS);
+      for (let attempt = 0; attempt < CAMERA_CAPTURE_ATTEMPTS; attempt += 1) {
+        if (cancelled) return;
+        try {
+          const photo = await cameraRef.current?.takePictureAsync({
+            quality: 0.66,
+            shutterSound: false,
+            skipProcessing: false,
+          });
+          if (cancelled) return;
+          if (!photo?.uri) throw new Error('capture_unavailable');
+          onCaptured(photo.uri, liveCapture);
+          return;
+        } catch {
+          if (attempt < CAMERA_CAPTURE_ATTEMPTS - 1) {
+            await wait(CAMERA_CAPTURE_RETRY_MS);
+          }
+        }
+      }
+      if (!cancelled) fallBackFromLiveCapture();
+    };
+    void capture();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [cameraReady, fallBackFromLiveCapture, liveCapture, onCaptured]);
+
+  useEffect(() => {
+    if (!liveCapture || cameraReady) return;
+    const timer = setTimeout(fallBackFromLiveCapture, CAMERA_READY_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [cameraReady, fallBackFromLiveCapture, liveCapture]);
 
   useEffect(() => {
     void AccessibilityInfo.isReduceMotionEnabled().then(setReduceMotion);
@@ -884,8 +1441,151 @@ function ScannerScreen({
     }).start();
   }, [guidanceKey, guidanceOpacity, reduceMotion]);
 
+  const handleLiveItemsChanged = useCallback(
+    (event: { nativeEvent: { items: LiveDataScannerItem[] } }) => {
+      if (busyRef.current) return;
+      const items = event.nativeEvent.items;
+      latestLiveItemsRef.current = items;
+
+      if (scanModeRef.current === 'barcode') {
+        const barcode = items.find(
+          (item) => item.kind === 'barcode' && item.value.trim(),
+        );
+        if (barcode) {
+          setLiveHighlightedItemIds([barcode.id]);
+          setLiveConfirmed(true);
+          finishIdentifierScan(barcode.value.trim(), []);
+          return;
+        }
+
+        const evidence = liveTextEvidence(items);
+        const identifier = extractValidGtin(evidence.text);
+        const strongIdentifier = extractStrongPrintedGtin(
+          evidence.observations,
+        );
+        const selected = identifierHighlightLines(
+          strongIdentifier ?? identifier ?? '',
+          evidence.observations,
+        );
+        const selectedItemIds = itemIdsForSelectedObservations(
+          evidence,
+          selected,
+        );
+        setLiveHighlightedItemIds((current) =>
+          current.length === selectedItemIds.length &&
+          current.every((id, index) => id === selectedItemIds[index])
+            ? current
+            : selectedItemIds,
+        );
+        return;
+      }
+
+      const evidence = liveTextEvidence(items);
+      const recognized: RecognizedPackagingText = {
+        lines: evidence.lines,
+        observations: evidence.observations,
+        text: evidence.text,
+      };
+      latestRecognizedRef.current = recognized;
+      const identity = productLookupTextFromRecognizedText(
+        recognized.text,
+        recognized.observations ?? recognized.lines,
+      );
+      const selected = recognizedTextHighlightLines(
+        identity,
+        evidence.observations,
+      );
+      const selectedItemIds = itemIdsForSelectedObservations(
+        evidence,
+        selected,
+      );
+      setLiveHighlightedItemIds((current) =>
+        current.length === selectedItemIds.length &&
+        current.every((id, index) => id === selectedItemIds[index])
+          ? current
+          : selectedItemIds,
+      );
+    },
+    [finishIdentifierScan],
+  );
+
+  const evaluateLiveItems = useCallback(() => {
+    if (busyRef.current) return;
+    const evidence = liveTextEvidence(latestLiveItemsRef.current);
+
+    if (scanModeRef.current === 'barcode') {
+      const identifier = extractValidGtin(evidence.text);
+      const strongIdentifier = extractStrongPrintedGtin(evidence.observations);
+      const identifierLock = advanceAutoCaptureIdentifierLock(
+        identifierLockRef.current,
+        identifier,
+      );
+      identifierLockRef.current = identifierLock;
+      if (strongIdentifier || identifierLock.observations === 2) {
+        const value = strongIdentifier ?? identifierLock.value;
+        setLiveConfirmed(true);
+        finishIdentifierScan(value, []);
+      }
+      return;
+    }
+
+    const recognized: RecognizedPackagingText = {
+      lines: evidence.lines,
+      observations: evidence.observations,
+      text: evidence.text,
+    };
+    latestRecognizedRef.current = recognized;
+    const identity = productLookupTextFromRecognizedText(
+      recognized.text,
+      recognized.observations ?? recognized.lines,
+    );
+    const selected = recognizedTextHighlightLines(
+      identity,
+      evidence.observations,
+    );
+    const selectedItemIds = itemIdsForSelectedObservations(evidence, selected);
+    const confirmedItemIds = selectedItemIds.length
+      ? selectedItemIds
+      : [...new Set(evidence.itemIds)];
+    const previous = lockRef.current;
+    const next = advanceAutoCaptureLock(previous, identity || evidence.text);
+    lockRef.current = next;
+    setLockStage(next.stage);
+    if (next.stage > 0 && next.stage !== previous.stage) {
+      if (next.stage === 1) void Haptics.selectionAsync();
+      if (next.stage === 2) {
+        void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      }
+    }
+    if (next.stage === 3) {
+      finishLiveProductScan(recognized, confirmedItemIds);
+    }
+  }, [finishIdentifierScan, finishLiveProductScan]);
+
   useEffect(() => {
-    if (!cameraReady || !permission?.granted || !recognitionAvailable) return;
+    if (!useLiveScanner || !isFocused) return;
+    const timer = setInterval(evaluateLiveItems, LIVE_SCANNER_EVALUATION_MS);
+    return () => clearInterval(timer);
+  }, [evaluateLiveItems, isFocused, useLiveScanner]);
+
+  useEffect(() => {
+    if (!useLiveScanner || scanMode !== 'barcode' || busyRef.current) return;
+    const timer = setTimeout(
+      () => setBarcodeProbeAttempts(5),
+      LIVE_BARCODE_FALLBACK_MS,
+    );
+    return () => clearTimeout(timer);
+  }, [scanMode, useLiveScanner]);
+
+  useEffect(() => {
+    if (
+      useLiveScanner ||
+      !isFocused ||
+      !cameraReady ||
+      !permission?.granted ||
+      !recognitionAvailable
+    )
+      return;
 
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -895,14 +1595,9 @@ function ScannerScreen({
       if (stage === 2) {
         await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       }
-      if (stage === 3) {
-        await Haptics.notificationAsync(
-          Haptics.NotificationFeedbackType.Success,
-        );
-      }
     };
 
-    const schedule = (delay = 900) => {
+    const schedule = (delay = scanMode === 'barcode' ? 1800 : 1250) => {
       if (!cancelled && !busyRef.current) {
         timer = setTimeout(() => void probe(), delay);
       }
@@ -925,45 +1620,58 @@ function ScannerScreen({
         if (cancelled || busyRef.current) return;
         latestRecognizedRef.current = recognized;
         if (scanMode === 'barcode') {
+          const observations = recognized.observations ?? [];
           const identifier = extractValidGtin(recognized.text);
+          const strongIdentifier = extractStrongPrintedGtin(observations);
           const identifierLock = advanceAutoCaptureIdentifierLock(
             identifierLockRef.current,
             identifier,
           );
           identifierLockRef.current = identifierLock;
-          if (identifierLock.observations === 2) {
-            busyRef.current = true;
-            void Haptics.notificationAsync(
-              Haptics.NotificationFeedbackType.Success,
+          if (strongIdentifier || identifierLock.observations === 2) {
+            const value = strongIdentifier ?? identifierLock.value;
+            const nextHighlights = scannerHighlightsFromText(
+              identifierHighlightLines(value, observations),
+              { height: photo.height, width: photo.width },
+              previewSize,
+              'confirmed',
             );
-            onScanned(identifierLock.value);
+            finishIdentifierScan(value, nextHighlights);
             return;
           }
 
           setBarcodeProbeAttempts((current) => Math.min(5, current + 1));
         } else {
+          const observations = recognized.observations ?? [];
           const identity = productLookupTextFromRecognizedText(
             recognized.text,
             recognized.observations ?? recognized.lines,
           );
           const previous = lockRef.current;
           const next = advanceAutoCaptureLock(previous, identity);
+          const nextHighlights = scannerHighlightsFromText(
+            recognizedTextHighlightLines(identity, observations),
+            { height: photo.height, width: photo.width },
+            previewSize,
+            next.stage === 3 ? 'confirmed' : 'detected',
+          );
           lockRef.current = next;
           setLockStage(next.stage);
+          setHighlights(next.stage > 0 ? nextHighlights : []);
           if (next.stage > 0 && next.stage !== previous.stage) {
             void hapticForStage(next.stage).catch(() => undefined);
           }
 
           if (next.stage === 3) {
-            busyRef.current = true;
             probeUri = null;
-            onCaptured(photo.uri, recognized);
+            finishProductScan(photo.uri, recognized, nextHighlights);
             return;
           }
         }
       } catch {
         lockRef.current = emptyAutoCaptureLock;
         setLockStage(0);
+        setHighlights([]);
         setCaptureError('La lecture automatique reprendra dans un instant.');
       } finally {
         if (probeUri) {
@@ -975,26 +1683,38 @@ function ScannerScreen({
       }
     };
 
-    schedule(650);
+    schedule(900);
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
   }, [
     cameraReady,
-    onCaptured,
-    onScanned,
+    finishIdentifierScan,
+    finishProductScan,
+    isFocused,
     permission?.granted,
+    previewSize,
     recognitionAvailable,
     scanMode,
+    useLiveScanner,
   ]);
 
-  const handleBarcode = (value: string) => {
+  const handleBarcode = (result: BarcodeScanningResult) => {
     if (scanModeRef.current !== 'barcode' || busyRef.current) return;
-    busyRef.current = true;
-    setLockStage(3);
-    void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    onScanned(value);
+    const rect = barcodeHighlightRect(result, previewSize);
+    finishIdentifierScan(
+      result.data,
+      rect
+        ? [
+            {
+              id: `code-${result.type}`,
+              rect,
+              tone: 'confirmed',
+            },
+          ]
+        : [],
+    );
   };
 
   useEffect(() => {
@@ -1011,26 +1731,35 @@ function ScannerScreen({
     lockRef.current = emptyAutoCaptureLock;
     setCaptureError(null);
     setLockStage(0);
+    setHighlights([]);
+    setLiveConfirmed(false);
+    setLiveHighlightedItemIds([]);
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setScanMode('front');
   }, [barcodeGuidance, recognitionAvailable, scanMode]);
 
   const guidance =
     scanMode === 'barcode'
-      ? barcodeGuidance === 'seek'
+      ? lockStage === 3
         ? {
-            detail: 'Il peut être au dos, dessous ou sur le côté.',
-            title: 'Montre le code-barres',
+            detail: 'Recherche du produit…',
+            title: 'Code détecté',
           }
-        : barcodeGuidance === 'rotate'
+        : barcodeGuidance === 'seek'
           ? {
-              detail: 'Je cherche aussi les petits codes verticaux.',
-              title: 'Tourne doucement le produit',
+              detail: 'Barres ou chiffres : il peut être au dos ou dessous.',
+              title: 'Montre le code du produit',
             }
-          : {
-              detail: 'Montre maintenant la face avant.',
-              title: 'Aucun code détecté',
-            }
+          : barcodeGuidance === 'rotate'
+            ? {
+                detail:
+                  'Je lis aussi les codes composés uniquement de chiffres.',
+                title: 'Tourne doucement le produit',
+              }
+            : {
+                detail: 'Montre maintenant la face avant.',
+                title: 'Aucun code détecté',
+              }
       : lockStage === 0
         ? detectedIdentifier
           ? {
@@ -1065,6 +1794,7 @@ function ScannerScreen({
     return <View style={[styles.scanner, { backgroundColor: colors.text }]} />;
 
   if (!permission.granted) {
+    const canAskAgain = permission.canAskAgain !== false;
     return (
       <ScrollView
         contentContainerStyle={[
@@ -1094,11 +1824,13 @@ function ScannerScreen({
         </Text>
         <Pressable
           accessibilityRole="button"
-          onPress={() => void requestPermission()}
+          onPress={() =>
+            void (canAskAgain ? requestPermission() : Linking.openSettings())
+          }
           style={[styles.primaryButton, { backgroundColor: colors.tint }]}
         >
           <Text style={styles.primaryButtonText}>
-            Autoriser l’appareil photo
+            {canAskAgain ? 'Autoriser l’appareil photo' : 'Ouvrir Réglages'}
           </Text>
         </Pressable>
         <Pressable
@@ -1115,35 +1847,84 @@ function ScannerScreen({
   }
 
   return (
-    <View style={styles.scanner}>
-      <CameraView
-        ref={cameraRef}
-        style={StyleSheet.absoluteFill}
-        facing="back"
-        onCameraReady={() => setCameraReady(true)}
-        barcodeScannerSettings={{
-          barcodeTypes: [
-            'ean13',
-            'ean8',
-            'upc_a',
-            'upc_e',
-            'code128',
-            'code39',
-            'code93',
-            'itf14',
-            'codabar',
-            'datamatrix',
-            'pdf417',
-            'aztec',
-            'qr',
-          ],
-        }}
-        onBarcodeScanned={
-          scanMode === 'barcode' && !busyRef.current
-            ? ({ data }) => handleBarcode(data)
-            : undefined
-        }
-      />
+    <View
+      testID="scanner-screen"
+      onLayout={({ nativeEvent }) => {
+        const { height, width } = nativeEvent.layout;
+        setPreviewSize((current) =>
+          current.height === height && current.width === width
+            ? current
+            : { height, width },
+        );
+      }}
+      style={styles.scanner}
+    >
+      {useLiveScanner && !liveCapture ? (
+        <LiveDataScannerView
+          active={isFocused}
+          confirmed={liveConfirmed}
+          highlightedItemIds={liveHighlightedItemIds}
+          mode={scanMode}
+          onError={({ nativeEvent }) => {
+            setLiveScannerFailed(true);
+            setLiveConfirmed(false);
+            setLiveHighlightedItemIds([]);
+            setCameraReady(false);
+            setCaptureError(
+              nativeEvent.message ||
+                'Le suivi en direct est indisponible. Le scan standard prend le relais.',
+            );
+          }}
+          onItemsChanged={handleLiveItemsChanged}
+          style={StyleSheet.absoluteFill}
+          testID="live-data-scanner"
+        />
+      ) : (
+        <CameraView
+          active={isFocused}
+          ref={cameraRef}
+          style={StyleSheet.absoluteFill}
+          facing="back"
+          onCameraReady={() => setCameraReady(true)}
+          barcodeScannerSettings={{
+            barcodeTypes: [
+              'ean13',
+              'ean8',
+              'upc_a',
+              'upc_e',
+              'code128',
+              'code39',
+              'code93',
+              'itf14',
+              'codabar',
+              'datamatrix',
+              'pdf417',
+              'aztec',
+              'qr',
+            ],
+          }}
+          onBarcodeScanned={
+            scanMode === 'barcode' && !busyRef.current
+              ? handleBarcode
+              : undefined
+          }
+          testID="camera-view"
+        />
+      )}
+      <View
+        accessibilityElementsHidden
+        importantForAccessibility="no-hide-descendants"
+        pointerEvents="none"
+        style={styles.scannerHighlights}
+      >
+        {highlights.map((highlight) => (
+          <ScannerHighlightBox
+            highlight={highlight}
+            key={highlight.id}
+            reduceMotion={reduceMotion}
+          />
+        ))}
+      </View>
       <View style={[styles.scannerTop, { paddingTop: insets.top + 12 }]}>
         <Pressable
           accessibilityRole="button"
@@ -1154,7 +1935,7 @@ function ScannerScreen({
           <Text style={styles.scannerCancelText}>Annuler</Text>
         </Pressable>
       </View>
-      <View style={styles.scannerGuide}>
+      <View pointerEvents="box-none" style={styles.scannerGuide}>
         <View style={styles.scanFrame} pointerEvents="none">
           {(['topLeft', 'topRight', 'bottomLeft', 'bottomRight'] as const).map(
             (corner) => (
@@ -1164,7 +1945,7 @@ function ScannerScreen({
                   styles.scanCorner,
                   styles[corner],
                   {
-                    borderColor: lockStage === 3 ? colors.tint : '#FFFFFF',
+                    borderColor: lockStage === 3 ? colors.tint : colors.onTint,
                     opacity: lockStage === 0 ? 0.82 : 1,
                   },
                 ]}
@@ -1194,7 +1975,8 @@ function ScannerScreen({
                         lockStage === 3 && stage <= lockStage
                           ? colors.tint
                           : 'transparent',
-                      borderColor: lockStage === 3 ? colors.tint : '#FFFFFF',
+                      borderColor:
+                        lockStage === 3 ? colors.tint : colors.onTint,
                       opacity: stage <= lockStage ? 1 : 0.45,
                     },
                   ]}
@@ -1254,12 +2036,111 @@ function ScannerScreen({
   );
 }
 
+export function CloudConsentScreen({
+  imageUri,
+  onCancel,
+  onContinue,
+  onManual,
+}: {
+  imageUri: string;
+  onCancel: () => void;
+  onContinue: () => void;
+  onManual: () => void;
+}) {
+  const colors = Colors;
+  const insets = useSafeAreaInsets();
+  const [isStarting, setIsStarting] = useState(false);
+  return (
+    <View style={[styles.screen, { backgroundColor: colors.cameraBackground }]}>
+      <Image
+        source={imageUri}
+        style={StyleSheet.absoluteFill}
+        contentFit="cover"
+        accessibilityLabel="Produit photographié"
+      />
+      <View style={[StyleSheet.absoluteFill, styles.candidateCameraScrim]} />
+      <View style={styles.issueLayout}>
+        <View
+          style={[
+            styles.issueSheet,
+            {
+              backgroundColor: colors.background,
+              paddingBottom: insets.bottom + 24,
+            },
+          ]}
+        >
+          <View
+            style={[
+              styles.issueIcon,
+              { backgroundColor: colors.backgroundSelected },
+            ]}
+          >
+            <AppSymbol name="hand.raised.fill" color={colors.tint} size={27} />
+          </View>
+          <Text style={[styles.issueTitle, { color: colors.text }]}>
+            Rechercher avec la face avant ?
+          </Text>
+          <Text style={[styles.issueBody, { color: colors.textSecondary }]}>
+            Une image recadrée sera envoyée à Google pour identifier le produit,
+            puis supprimée. Elle ne sera pas ajoutée à ton catalogue.
+          </Text>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityState={{ disabled: isStarting }}
+            disabled={isStarting}
+            onPress={() => {
+              setIsStarting(true);
+              onContinue();
+            }}
+            style={({ pressed }) => [
+              styles.primaryButton,
+              {
+                backgroundColor: colors.tint,
+                opacity: pressed || isStarting ? 0.65 : 1,
+              },
+            ]}
+          >
+            <Text style={styles.primaryButtonText}>
+              {isStarting ? 'Démarrage…' : 'Continuer'}
+            </Text>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            onPress={onManual}
+            style={styles.secondaryAction}
+          >
+            <Text style={[styles.secondaryActionText, { color: colors.tint }]}>
+              Saisir manuellement
+            </Text>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            onPress={onCancel}
+            style={styles.secondaryAction}
+          >
+            <Text
+              style={[
+                styles.secondaryActionText,
+                { color: colors.textSecondary },
+              ]}
+            >
+              Annuler
+            </Text>
+          </Pressable>
+        </View>
+      </View>
+    </View>
+  );
+}
+
 function RecognitionProgress({
   imageUri,
   mode,
+  onCancel,
 }: {
   imageUri: string | null;
   mode: 'local' | 'web';
+  onCancel: () => void;
 }) {
   const colors = Colors;
   const insets = useSafeAreaInsets();
@@ -1267,7 +2148,7 @@ function RecognitionProgress({
     return (
       <View
         accessibilityLiveRegion="polite"
-        style={[styles.screen, { backgroundColor: '#000000' }]}
+        style={[styles.screen, { backgroundColor: colors.cameraBackground }]}
       >
         <Image
           source={imageUri}
@@ -1276,13 +2157,21 @@ function RecognitionProgress({
           accessibilityLabel="Photo du produit en cours d’analyse"
         />
         <View style={[StyleSheet.absoluteFill, styles.progressCameraScrim]} />
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Annuler la recherche"
+          onPress={onCancel}
+          style={[styles.issueCancel, { top: insets.top + 8 }]}
+        >
+          <Text style={styles.scannerCancelText}>Annuler</Text>
+        </Pressable>
         <View
           style={[
             styles.progressCameraStatus,
             { paddingBottom: insets.bottom + 32 },
           ]}
         >
-          <ActivityIndicator color="#FFFFFF" size="large" />
+          <ActivityIndicator color={colors.onTint} size="large" />
           <Text style={styles.progressCameraTitle}>
             {mode === 'web'
               ? 'Recherche de la fiche complète…'
@@ -1320,6 +2209,15 @@ function RecognitionProgress({
           ? 'La photo recadrée est envoyée à Google, puis supprimée.'
           : 'Lecture locale avant la recherche en ligne.'}
       </Text>
+      <Pressable
+        accessibilityRole="button"
+        onPress={onCancel}
+        style={styles.secondaryAction}
+      >
+        <Text style={[styles.secondaryActionText, { color: colors.tint }]}>
+          Annuler
+        </Text>
+      </Pressable>
     </ScrollView>
   );
 }
@@ -1340,7 +2238,7 @@ function RecognitionIssueScreen({
   const colors = Colors;
   const insets = useSafeAreaInsets();
   return (
-    <View style={[styles.screen, { backgroundColor: '#000000' }]}>
+    <View style={[styles.screen, { backgroundColor: colors.cameraBackground }]}>
       {imageUri ? (
         <Image
           source={imageUri}
@@ -1414,9 +2312,10 @@ function RecognitionIssueScreen({
   );
 }
 
-function CandidateSelection({
+export function CandidateSelection({
   backgroundImageUri,
   candidates,
+  isSaving = false,
   message,
   reportingCandidateId,
   onCancel,
@@ -1426,6 +2325,7 @@ function CandidateSelection({
 }: {
   backgroundImageUri: string | null;
   candidates: ProductCandidate[];
+  isSaving?: boolean;
   message: string | null;
   reportingCandidateId: string | null;
   onCancel: () => void;
@@ -1442,7 +2342,11 @@ function CandidateSelection({
     <View
       style={[
         styles.screen,
-        { backgroundColor: overCamera ? '#000000' : colors.background },
+        {
+          backgroundColor: overCamera
+            ? colors.cameraBackground
+            : colors.background,
+        },
       ]}
     >
       {backgroundImageUri ? (
@@ -1479,18 +2383,11 @@ function CandidateSelection({
             onPress={onCancel}
             style={styles.navAction}
           >
-            <Text
-              maxFontSizeMultiplier={1.4}
-              style={[styles.cancelText, { color: colors.tint }]}
-            >
+            <Text style={[styles.cancelText, { color: colors.tint }]}>
               Annuler
             </Text>
           </Pressable>
-          <Text
-            maxFontSizeMultiplier={1.4}
-            numberOfLines={1}
-            style={[styles.navTitle, { color: colors.text }]}
-          >
+          <Text style={[styles.navTitle, { color: colors.text }]}>
             Résultats
           </Text>
           <View style={styles.navBalance} />
@@ -1510,8 +2407,8 @@ function CandidateSelection({
         </Text>
         <Text style={[styles.formIntro, { color: colors.textSecondary }]}>
           {decisive
-            ? 'Vérifie une dernière fois avant de consulter sa fiche.'
-            : 'Choisis une suggestion, puis vérifie sa fiche.'}
+            ? 'Vérifie une dernière fois avant de l’ajouter.'
+            : 'Choisis une suggestion pour l’ajouter.'}
         </Text>
         {message ? <Notice message={message} /> : null}
         <View style={styles.candidateList}>
@@ -1573,17 +2470,19 @@ function CandidateSelection({
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel={`Confirmer ${[candidate.brand, candidate.name].filter(Boolean).join(' ')}`}
+                accessibilityState={{ disabled: isSaving }}
+                disabled={isSaving}
                 onPress={() => onConfirm(candidate)}
                 style={({ pressed }) => [
                   styles.candidateConfirm,
                   {
                     backgroundColor: colors.tint,
-                    opacity: pressed ? 0.8 : 1,
+                    opacity: pressed || isSaving ? 0.65 : 1,
                   },
                 ]}
               >
                 <Text style={styles.candidateConfirmText}>
-                  C’est ce produit
+                  {isSaving ? 'Ajout…' : 'C’est ce produit'}
                 </Text>
               </Pressable>
               {candidate.source === 'shared' ? (
@@ -1622,6 +2521,7 @@ function ProductForm({
   draft,
   previewImageUri,
   isLookingUp,
+  isEnriching,
   isSaving,
   message,
   error,
@@ -1632,6 +2532,7 @@ function ProductForm({
   draft: ProductDraft;
   previewImageUri: string | null;
   isLookingUp: boolean;
+  isEnriching: boolean;
   isSaving: boolean;
   message: string | null;
   error: string | null;
@@ -1660,18 +2561,11 @@ function ProductForm({
             onPress={onCancel}
             style={styles.navAction}
           >
-            <Text
-              maxFontSizeMultiplier={1.4}
-              style={[styles.cancelText, { color: colors.tint }]}
-            >
+            <Text style={[styles.cancelText, { color: colors.tint }]}>
               Annuler
             </Text>
           </Pressable>
-          <Text
-            maxFontSizeMultiplier={1.4}
-            numberOfLines={1}
-            style={[styles.navTitle, { color: colors.text }]}
-          >
+          <Text style={[styles.navTitle, { color: colors.text }]}>
             Vérifier le produit
           </Text>
           <View style={styles.navBalance} />
@@ -1679,11 +2573,13 @@ function ProductForm({
         <Text style={[styles.formIntro, { color: colors.textSecondary }]}>
           Vérifie les informations avant d’ajouter ce produit.
         </Text>
-        {isLookingUp ? (
+        {isLookingUp || isEnriching ? (
           <View style={styles.lookupRow}>
             <ActivityIndicator color={colors.tint} />
             <Text style={[styles.lookupText, { color: colors.textSecondary }]}>
-              Recherche du produit…
+              {isEnriching
+                ? 'Ajout de la photo et des ingrédients…'
+                : 'Recherche du produit…'}
             </Text>
           </View>
         ) : null}
@@ -2021,20 +2917,20 @@ function CategoryField({
   );
 }
 
-function RoutineAssociation({
+export function ProductSuccess({
   product,
   routine,
   isSaving,
   message,
   onAdd,
-  onSkip,
+  onDone,
 }: {
   product: Product | null;
   routine: RoutineOccurrence | null;
   isSaving: boolean;
   message: string | null;
   onAdd: () => void;
-  onSkip: () => void;
+  onDone: () => void;
 }) {
   const colors = Colors;
   const insets = useSafeAreaInsets();
@@ -2055,15 +2951,29 @@ function RoutineAssociation({
             { backgroundColor: colors.backgroundSelected },
           ]}
         >
-          <AppSymbol name="checklist" color={colors.tint} size={31} />
+          <AppSymbol name="checkmark" color={colors.tint} size={31} />
         </View>
         <Text style={[styles.associationTitle, { color: colors.text }]}>
-          L’ajouter à ta routine ?
+          Produit ajouté
         </Text>
         <Text style={[styles.emptyBody, { color: colors.textSecondary }]}>
           {product?.name ?? 'Ce produit'} est enregistré dans ton catalogue.
         </Text>
         {message ? <Notice message={message} /> : null}
+        <Pressable
+          accessibilityRole="button"
+          onPress={onDone}
+          style={({ pressed }) => [
+            styles.primaryButton,
+            {
+              alignSelf: 'stretch',
+              backgroundColor: colors.tint,
+              opacity: pressed ? 0.8 : 1,
+            },
+          ]}
+        >
+          <Text style={styles.primaryButtonText}>Retour aux produits</Text>
+        </Pressable>
         {routine ? (
           <View
             style={[
@@ -2077,18 +2987,13 @@ function RoutineAssociation({
                 { color: colors.textSecondary },
               ]}
             >
-              Routine choisie
+              Optionnel
             </Text>
             <Text style={[styles.routineChoiceTitle, { color: colors.text }]}>
-              {routine.routine.name}
+              Ajouter à {routine.routine.name}
             </Text>
           </View>
-        ) : (
-          <Text style={[styles.emptyBody, { color: colors.textSecondary }]}>
-            Crée une routine depuis Aujourd’hui pour pouvoir y ajouter ce
-            produit.
-          </Text>
-        )}
+        ) : null}
         {routine ? (
           <Pressable
             accessibilityRole="button"
@@ -2103,28 +3008,133 @@ function RoutineAssociation({
             ]}
           >
             <Text style={styles.primaryButtonText}>
-              {isSaving ? 'Ajout…' : 'Ajouter à cette routine'}
+              {isSaving ? 'Ajout…' : 'Ajouter à la routine'}
             </Text>
           </Pressable>
         ) : null}
-        <Pressable
-          accessibilityRole="button"
-          onPress={onSkip}
-          style={styles.secondaryAction}
-        >
-          <Text style={[styles.secondaryActionText, { color: colors.tint }]}>
-            Pas maintenant
-          </Text>
-        </Pressable>
       </ScrollView>
     </View>
   );
 }
 
-function ProductRow({ product }: { product: Product }) {
+function ProductDetail({
+  product,
+  onBack,
+}: {
+  product: Product;
+  onBack: () => void;
+}) {
+  const colors = Colors;
+  const insets = useSafeAreaInsets();
+  const ingredients = parseIngredientList(product.ingredientsText ?? '');
+  return (
+    <View style={[styles.screen, { backgroundColor: colors.background }]}>
+      <ScrollView
+        contentContainerStyle={[
+          styles.form,
+          { paddingBottom: insets.bottom + 48, paddingTop: insets.top + 12 },
+        ]}
+      >
+        <View style={styles.navRow}>
+          <Pressable
+            accessibilityRole="button"
+            onPress={onBack}
+            style={styles.navAction}
+          >
+            <Text style={[styles.cancelText, { color: colors.tint }]}>
+              Retour
+            </Text>
+          </Pressable>
+          <Text style={[styles.navTitle, { color: colors.text }]}>Produit</Text>
+          <View style={styles.navBalance} />
+        </View>
+        {product.imageUrl ? (
+          <Image
+            source={product.imageUrl}
+            style={styles.detailImage}
+            contentFit="contain"
+          />
+        ) : null}
+        <Text style={[styles.candidateTitle, { color: colors.text }]}>
+          {product.name}
+        </Text>
+        <Text style={[styles.productMeta, { color: colors.textSecondary }]}>
+          {[product.brand, product.category].filter(Boolean).join(' · ')}
+        </Text>
+        {product.imageSource ? (
+          <Pressable
+            accessibilityRole={product.imageSourceUrl ? 'link' : undefined}
+            disabled={!product.imageSourceUrl}
+            onPress={() =>
+              product.imageSourceUrl &&
+              void Linking.openURL(product.imageSourceUrl)
+            }
+            style={styles.inlineAction}
+          >
+            <Text style={[styles.imageCredit, { color: colors.tint }]}>
+              Image : {product.imageSource}
+              {product.imageLicense ? ` · ${product.imageLicense}` : ''}
+            </Text>
+          </Pressable>
+        ) : null}
+        {ingredients.length ? (
+          <View
+            style={[
+              styles.ingredientsSection,
+              { borderColor: colors.separator },
+            ]}
+          >
+            <Text style={[styles.routineChoiceTitle, { color: colors.text }]}>
+              Ingrédients
+            </Text>
+            {ingredients.map((ingredient) => (
+              <View
+                key={`${ingredient.position}-${ingredient.normalizedName}`}
+                style={[
+                  styles.ingredientRow,
+                  { borderColor: colors.separator },
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.ingredientPosition,
+                    { color: colors.textSecondary },
+                  ]}
+                >
+                  {ingredient.position + 1}
+                </Text>
+                <Text style={[styles.ingredientName, { color: colors.text }]}>
+                  {ingredient.name}
+                </Text>
+              </View>
+            ))}
+          </View>
+        ) : (
+          <Notice message="La liste d’ingrédients n’est pas encore disponible." />
+        )}
+      </ScrollView>
+    </View>
+  );
+}
+
+function ProductRow({
+  product,
+  onPress,
+}: {
+  product: Product;
+  onPress: () => void;
+}) {
   const colors = Colors;
   return (
-    <View style={[styles.productRow, { borderColor: colors.separator }]}>
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`Ouvrir ${product.name}`}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.productRow,
+        { borderColor: colors.separator, opacity: pressed ? 0.7 : 1 },
+      ]}
+    >
       {product.imageUrl ? (
         <Image
           source={product.imageUrl}
@@ -2160,17 +3170,9 @@ function ProductRow({ product }: { product: Product }) {
             {[product.brand, product.category].filter(Boolean).join(' · ')}
           </Text>
         ) : null}
-        {product.imageSource ? (
-          <Text
-            style={[styles.imageCredit, { color: colors.textSecondary }]}
-            numberOfLines={1}
-          >
-            Image : {product.imageSource}
-            {product.imageLicense ? ` · ${product.imageLicense}` : ''}
-          </Text>
-        ) : null}
       </View>
-    </View>
+      <AppSymbol name="chevron.right" color={colors.textSecondary} size={14} />
+    </Pressable>
   );
 }
 
@@ -2209,6 +3211,7 @@ function AppSymbol({
 const styles = StyleSheet.create({
   screen: { flex: 1 },
   catalogue: { gap: 16, paddingBottom: 148, paddingHorizontal: 24 },
+  catalogueHeader: { gap: 16 },
   largeTitle: {
     fontSize: 34,
     fontWeight: '700',
@@ -2239,7 +3242,7 @@ const styles = StyleSheet.create({
   },
   emptyBody: { fontSize: 17, lineHeight: 24, textAlign: 'center' },
   bottomActions: {
-    borderTopColor: '#D8E1E8',
+    borderTopColor: Colors.separator,
     borderTopWidth: StyleSheet.hairlineWidth,
     gap: 8,
     paddingHorizontal: 24,
@@ -2254,14 +3257,13 @@ const styles = StyleSheet.create({
     minHeight: 50,
     paddingHorizontal: 16,
   },
-  primaryButtonText: { color: '#FFFFFF', fontSize: 17, fontWeight: '700' },
+  primaryButtonText: { color: Colors.onTint, fontSize: 17, fontWeight: '700' },
   secondaryAction: {
     alignItems: 'center',
     justifyContent: 'center',
     minHeight: 44,
   },
   secondaryActionText: { fontSize: 17, fontWeight: '600' },
-  productList: { gap: 1, marginTop: 8 },
   productRow: {
     alignItems: 'center',
     borderBottomWidth: StyleSheet.hairlineWidth,
@@ -2282,22 +3284,51 @@ const styles = StyleSheet.create({
   productName: { fontSize: 17, fontWeight: '600', lineHeight: 22 },
   productMeta: { fontSize: 15, lineHeight: 20 },
   candidateSource: { fontSize: 13, lineHeight: 18, marginTop: 2 },
-  scanner: { backgroundColor: '#000000', flex: 1 },
-  scannerTop: { paddingHorizontal: 18 },
+  scanner: { backgroundColor: Colors.cameraBackground, flex: 1 },
+  scannerHighlights: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 1,
+  },
+  scannerHighlight: {
+    borderColor: Colors.onTint,
+    borderRadius: 8,
+    borderWidth: 2,
+    position: 'absolute',
+    shadowColor: Colors.cameraBackground,
+    shadowOffset: { height: 0, width: 0 },
+    shadowOpacity: 0.7,
+    shadowRadius: 2,
+  },
+  scannerHighlightInner: {
+    borderColor: Colors.tint,
+    borderRadius: 6,
+    borderWidth: 2,
+    bottom: 1,
+    left: 1,
+    position: 'absolute',
+    right: 1,
+    top: 1,
+  },
+  scannerTop: { paddingHorizontal: 18, zIndex: 2 },
   scannerCancel: {
     alignSelf: 'flex-start',
-    backgroundColor: 'rgba(0,0,0,0.45)',
+    backgroundColor: Colors.cameraScrim,
     borderRadius: 12,
     minHeight: 44,
     justifyContent: 'center',
     paddingHorizontal: 14,
   },
-  scannerCancelText: { color: '#FFFFFF', fontSize: 17, fontWeight: '600' },
+  scannerCancelText: {
+    color: Colors.onTint,
+    fontSize: 17,
+    fontWeight: '600',
+  },
   scannerGuide: {
     alignItems: 'center',
     flex: 1,
     justifyContent: 'center',
     paddingHorizontal: 24,
+    zIndex: 2,
   },
   scanFrame: {
     height: 300,
@@ -2340,7 +3371,7 @@ const styles = StyleSheet.create({
   },
   scannerCopy: {
     alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.55)',
+    backgroundColor: Colors.cameraOverlayStrong,
     borderRadius: 10,
     gap: 2,
     marginTop: 20,
@@ -2350,13 +3381,13 @@ const styles = StyleSheet.create({
     width: '100%',
   },
   scannerInstruction: {
-    color: '#FFFFFF',
+    color: Colors.onTint,
     fontSize: 17,
     fontWeight: '700',
     textAlign: 'center',
   },
   scannerDetail: {
-    color: '#FFFFFF',
+    color: Colors.onTint,
     fontSize: 15,
     lineHeight: 20,
     textAlign: 'center',
@@ -2369,7 +3400,7 @@ const styles = StyleSheet.create({
     width: 12,
   },
   captureArea: { alignItems: 'center', gap: 8, paddingTop: 12 },
-  captureError: { color: '#FFFFFF', fontSize: 15, fontWeight: '600' },
+  captureError: { color: Colors.onTint, fontSize: 15, fontWeight: '600' },
   scannerChoices: {
     alignSelf: 'stretch',
     gap: 4,
@@ -2381,7 +3412,11 @@ const styles = StyleSheet.create({
     minHeight: 44,
     paddingHorizontal: 16,
   },
-  scannerManualText: { color: '#FFFFFF', fontSize: 17, fontWeight: '600' },
+  scannerManualText: {
+    color: Colors.onTint,
+    fontSize: 17,
+    fontWeight: '600',
+  },
   permissionScreen: {
     alignItems: 'center',
     flexGrow: 1,
@@ -2394,7 +3429,7 @@ const styles = StyleSheet.create({
     gap: 16,
     paddingHorizontal: 30,
   },
-  progressCameraScrim: { backgroundColor: 'rgba(0, 0, 0, 0.42)' },
+  progressCameraScrim: { backgroundColor: Colors.cameraScrim },
   progressCameraStatus: {
     alignItems: 'center',
     flex: 1,
@@ -2403,19 +3438,19 @@ const styles = StyleSheet.create({
     paddingHorizontal: 30,
   },
   progressCameraTitle: {
-    color: '#FFFFFF',
+    color: Colors.onTint,
     fontSize: 24,
     fontWeight: '700',
     textAlign: 'center',
   },
   progressCameraBody: {
-    color: '#FFFFFF',
+    color: Colors.onTint,
     fontSize: 17,
     lineHeight: 24,
     textAlign: 'center',
   },
   issueCancel: {
-    backgroundColor: 'rgba(0,0,0,0.45)',
+    backgroundColor: Colors.cameraScrim,
     borderRadius: 12,
     justifyContent: 'center',
     left: 18,
@@ -2444,7 +3479,7 @@ const styles = StyleSheet.create({
   progressTitle: { fontSize: 24, fontWeight: '700', textAlign: 'center' },
   progressBody: { fontSize: 17, lineHeight: 24, textAlign: 'center' },
   candidateScreen: { gap: 16, paddingBottom: 48, paddingHorizontal: 24 },
-  candidateCameraScrim: { backgroundColor: 'rgba(0, 0, 0, 0.34)' },
+  candidateCameraScrim: { backgroundColor: Colors.cameraScrimLight },
   candidateCameraScreen: {
     borderTopLeftRadius: 16,
     borderTopRightRadius: 16,
@@ -2478,7 +3513,11 @@ const styles = StyleSheet.create({
     minHeight: 48,
     paddingHorizontal: 16,
   },
-  candidateConfirmText: { color: '#FFFFFF', fontSize: 17, fontWeight: '700' },
+  candidateConfirmText: {
+    color: Colors.onTint,
+    fontSize: 17,
+    fontWeight: '700',
+  },
   wrongGuessAction: {
     alignItems: 'center',
     justifyContent: 'center',
@@ -2501,11 +3540,9 @@ const styles = StyleSheet.create({
   },
   cancelText: { fontSize: 17 },
   navTitle: {
+    flex: 1,
     fontSize: 17,
     fontWeight: '700',
-    left: 84,
-    position: 'absolute',
-    right: 84,
     textAlign: 'center',
   },
   navBalance: { width: 58 },
@@ -2518,6 +3555,13 @@ const styles = StyleSheet.create({
     height: 118,
     overflow: 'hidden',
     width: 118,
+  },
+  detailImage: {
+    alignSelf: 'center',
+    borderRadius: 16,
+    height: 220,
+    overflow: 'hidden',
+    width: 220,
   },
   productImageBlock: { alignItems: 'center', gap: 6 },
   imageCredit: { fontSize: 12, lineHeight: 16 },
@@ -2598,7 +3642,7 @@ const styles = StyleSheet.create({
   },
   ingredientName: { flex: 1, fontSize: 16, lineHeight: 22 },
   ingredientHelp: { fontSize: 15, lineHeight: 21 },
-  errorText: { color: '#B42318', fontSize: 15, lineHeight: 20 },
+  errorText: { color: Colors.error, fontSize: 15, lineHeight: 20 },
   notice: {
     alignItems: 'flex-start',
     borderRadius: 12,

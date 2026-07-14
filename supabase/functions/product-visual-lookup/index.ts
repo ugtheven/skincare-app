@@ -4,7 +4,11 @@ import {
 } from 'https://esm.sh/@supabase/supabase-js@2';
 
 import { controlledProductCategory } from '../_shared/product-category.ts';
-import { consumeGoogleVisionBudget } from '../_shared/google-vision-budget.ts';
+import {
+  consumeGoogleVisionBudget,
+  consumeSerpApiBudget,
+  recordProviderUsageOutcome,
+} from '../_shared/google-vision-budget.ts';
 import {
   ensureNormalizedProductImage,
   normalizeSourceImage,
@@ -22,7 +26,10 @@ import {
 import {
   type ApprovedDomain,
   candidatesFromWebDetection,
+  criticalProductVariantsMatch,
+  type DiscoveryDomain,
   normalizeWebText,
+  retailerIdentityHintsFromWebDetection,
   type WebDetection,
   webDetectionSignals,
   visualProductIdentityOverlap,
@@ -62,6 +69,14 @@ async function persistEnrichedWebCandidate(
   candidate: ReturnType<typeof candidatesFromWebDetection>[number],
 ) {
   if (!candidate.imageUrl) return null;
+  const normalizedName = compactText(candidate.name);
+  const normalizedBrand = compactText(candidate.brand);
+  const { data: existing } = await admin
+    .from('products')
+    .select('id, canonical_name, brand, category')
+    .eq('normalized_name', normalizedName)
+    .eq('normalized_brand', normalizedBrand)
+    .maybeSingle();
   const source = {
     domain: candidate.sourceDomain,
     sourceKind: candidate.sourceKind,
@@ -71,50 +86,17 @@ async function persistEnrichedWebCandidate(
     license: candidate.sourceLicense,
     licenseUrl: candidate.sourceLicenseUrl,
   } as const;
-  const normalizedImage = await normalizeSourceImage(admin, source, null);
+  const normalizedImage = await normalizeSourceImage(
+    admin,
+    source,
+    existing?.id ?? null,
+  );
   if (!normalizedImage) return null;
 
-  const normalizedName = compactText(candidate.name);
-  const normalizedBrand = compactText(candidate.brand);
-  const { data: existing } = await admin
-    .from('products')
-    .select('id')
-    .eq('normalized_name', normalizedName)
-    .eq('normalized_brand', normalizedBrand)
-    .maybeSingle();
-  const productResult = existing
-    ? { data: existing, error: null }
-    : await admin
-        .from('products')
-        .insert({
-          canonical_name: candidate.name,
-          normalized_name: normalizedName,
-          brand: candidate.brand,
-          normalized_brand: normalizedBrand,
-          category: controlledProductCategory(null, candidate.name),
-          confidence: Math.round(candidate.score * 100),
-        })
-        .select('id')
-        .single();
-  if (productResult.error || !productResult.data) return null;
-  const productId = productResult.data.id as string;
-  await normalizeSourceImage(admin, source, productId);
-  await admin.from('product_sources').upsert(
-    {
-      product_id: productId,
-      provider: 'google_manufacturer_page',
-      provider_product_id: candidate.sourceUrl,
-      source_url: candidate.sourceUrl,
-      license: candidate.sourceLicense,
-      fetched_at: new Date().toISOString(),
-    },
-    { onConflict: 'provider,provider_product_id' },
-  );
-
   const ingredientsText = await fetchIngredientList(candidate.sourceUrl);
-  if (ingredientsText) {
+  if (existing && ingredientsText) {
     await persistStructuredFormula(admin, {
-      productId,
+      productId: existing.id,
       ingredientsText,
       sourceProvider: candidate.brand,
       sourceUrl: candidate.sourceUrl,
@@ -125,8 +107,13 @@ async function persistEnrichedWebCandidate(
 
   return {
     ...candidate,
-    id: productId,
-    category: controlledProductCategory(null, candidate.name),
+    id: existing?.id ?? candidate.id,
+    name: existing?.canonical_name ?? candidate.name,
+    brand: existing?.brand ?? candidate.brand,
+    category: controlledProductCategory(
+      existing?.category ?? null,
+      existing?.canonical_name ?? candidate.name,
+    ),
     imageUrl: normalizedImage.imageUrl,
     imageSource: normalizedImage.imageSource,
     imageSourceUrl: normalizedImage.imageSourceUrl,
@@ -135,12 +122,34 @@ async function persistEnrichedWebCandidate(
     ingredientsText: ingredientsText || null,
     ingredientsSource: ingredientsText ? candidate.brand : null,
     ingredientsSourceUrl: ingredientsText ? candidate.sourceUrl : null,
-    matchSource: 'catalogue',
+    matchSource: existing ? 'catalogue' : 'google',
+  };
+}
+
+function manufacturerCandidate(
+  page: NonNullable<Awaited<ReturnType<typeof discoverManufacturerPage>>>,
+) {
+  return {
+    id: `manufacturer-sitemap:${compactText(page.sourceUrl)}`,
+    name: page.name,
+    brand: page.brand,
+    category: null,
+    imageUrl: page.imageUrl,
+    sourceUrl: page.sourceUrl,
+    sourceDomain: page.sourceDomain,
+    sourceKind: page.sourceKind,
+    sourceLicense: page.sourceLicense,
+    sourceLicenseUrl: page.sourceLicenseUrl,
+    score: 0.78,
   };
 }
 
 function textTokens(value: string) {
-  return [...new Set(normalizeWebText(value).split(' '))]
+  const normalized = normalizeWebText(value).replace(
+    /\bspf\s+(\d{1,3})\b/g,
+    'spf$1',
+  );
+  return [...new Set(normalized.split(' '))]
     .filter((token) => token.length >= 3 && !/^\d+$/.test(token))
     .slice(0, 16);
 }
@@ -153,6 +162,7 @@ function scoreProduct(
     product_aliases?: { alias: string }[];
   },
 ) {
+  if (!criticalProductVariantsMatch(value, product.canonical_name)) return 0;
   const queryTokens = textTokens(value);
   if (!queryTokens.length) return 0;
   return Math.max(
@@ -215,20 +225,22 @@ Deno.serve(async (request) => {
   const payload = await request.json().catch(() => ({}));
   const diagnosticsEnabled =
     payload?.diagnostics === true &&
+    Deno.env.get('VISUAL_LOOKUP_RUNTIME_ENV') === 'development' &&
     Deno.env.get('ALLOW_UNMETERED_VISUAL_LOOKUP') === 'true';
   const imageBase64 = payload?.imageBase64;
+  const requestId =
+    typeof payload?.requestId === 'string' &&
+    /^[A-Za-z0-9:_-]{8,120}$/.test(payload.requestId)
+      ? payload.requestId
+      : '';
   const recognizedText =
     typeof payload?.recognizedText === 'string'
       ? payload.recognizedText.slice(0, 3000)
       : '';
-  const identifier =
-    typeof payload?.identifier === 'string' &&
-    /^[A-Za-z0-9-]{3,32}$/.test(payload.identifier.trim())
-      ? payload.identifier.trim()
-      : '';
   if (
     payload?.mimeType !== 'image/jpeg' ||
     typeof imageBase64 !== 'string' ||
+    !requestId ||
     imageBase64.length < 100 ||
     imageBase64.length > MAX_BASE64_LENGTH ||
     !/^[A-Za-z0-9+/=]+$/.test(imageBase64)
@@ -236,17 +248,77 @@ Deno.serve(async (request) => {
     return response({ error: 'invalid_image' }, 400);
   }
 
+  const [approvedResult, discoveryResult] = await Promise.all([
+    admin
+      .from('brand_source_domains')
+      .select('domain, brand, source_kind, license, license_url'),
+    admin
+      .from('product_discovery_domains')
+      .select('domain, source_kind')
+      .eq('enabled', true),
+  ]);
+  if (approvedResult.error || discoveryResult.error) {
+    return response({ error: 'lookup_failed' }, 500);
+  }
+  const approvedRows = approvedResult.data;
+  const approvedDomains = (approvedRows ?? []) as ApprovedDomain[];
+  const discoveryDomains = (discoveryResult.data ?? []) as DiscoveryDomain[];
+  const recognizedOcrBrand = approvedDomains.find(
+    ({ brand, source_kind }) =>
+      source_kind === 'manufacturer' &&
+      normalizeWebText(recognizedText).includes(normalizeWebText(brand)),
+  );
+
+  if (recognizedOcrBrand) {
+    const manufacturerPage = await discoverManufacturerPage(
+      approvedDomains,
+      recognizedOcrBrand.brand,
+      recognizedText,
+    );
+    if (manufacturerPage) {
+      const manufacturerMatch = await persistEnrichedWebCandidate(
+        admin,
+        manufacturerCandidate(manufacturerPage),
+      );
+      if (manufacturerMatch) {
+        return response({
+          matches: [manufacturerMatch],
+          meta: {
+            googleCandidateCount: 0,
+            normalizedGoogleCandidateCount: 0,
+            serpApiCandidateCount: 0,
+            normalizedSerpApiCandidateCount: 0,
+            serpApiStatus: 'not_needed',
+            catalogueCandidateCount: 0,
+          },
+        });
+      }
+    }
+  }
+
   const apiKey = Deno.env.get('GOOGLE_CLOUD_VISION_API_KEY');
   if (!apiKey) return response({ error: 'visual_lookup_unavailable' }, 503);
-  const budget = await consumeGoogleVisionBudget(admin, user.id);
+  const googleRequestId = `${requestId}:google`;
+  const budget = await consumeGoogleVisionBudget(
+    admin,
+    user.id,
+    googleRequestId,
+  );
   if (!budget.allowed) {
-    const quotaReached = budget.reason === 'quota_reached';
+    const quotaReached = [
+      'global_quota_reached',
+      'quota_reached',
+      'rate_limited',
+    ].includes(budget.reason);
     return response({ error: budget.reason }, quotaReached ? 429 : 503);
   }
 
-  let googleResponse: Response;
+  const googleStartedAt = Date.now();
+  let detection: WebDetection = {};
+  let googleProviderError: 'provider_failed' | 'provider_unavailable' | null =
+    null;
   try {
-    googleResponse = await fetch(
+    const googleResponse = await fetch(
       `https://vision.googleapis.com/v1/images:annotate?key=${encodeURIComponent(
         apiKey,
       )}`,
@@ -264,65 +336,82 @@ Deno.serve(async (request) => {
         signal: AbortSignal.timeout(8_000),
       },
     );
+    if (!googleResponse.ok) {
+      await recordProviderUsageOutcome(
+        admin,
+        'google_vision',
+        user.id,
+        googleRequestId,
+        `http_${googleResponse.status}`,
+        googleStartedAt,
+      );
+      googleProviderError = 'provider_unavailable';
+    } else {
+      const googlePayload = await googleResponse.json();
+      const annotation = googlePayload?.responses?.[0];
+      if (annotation?.error) {
+        await recordProviderUsageOutcome(
+          admin,
+          'google_vision',
+          user.id,
+          googleRequestId,
+          'provider_error',
+          googleStartedAt,
+        );
+        googleProviderError = 'provider_failed';
+      } else {
+        await recordProviderUsageOutcome(
+          admin,
+          'google_vision',
+          user.id,
+          googleRequestId,
+          'success',
+          googleStartedAt,
+        );
+        detection = (annotation?.webDetection ?? {}) as WebDetection;
+      }
+    }
   } catch {
-    return response({ error: 'provider_unavailable' }, 503);
+    await recordProviderUsageOutcome(
+      admin,
+      'google_vision',
+      user.id,
+      googleRequestId,
+      'network_error',
+      googleStartedAt,
+    );
+    googleProviderError = 'provider_unavailable';
   }
-  if (!googleResponse.ok) {
-    return response({ error: 'provider_unavailable' }, 503);
-  }
-  const googlePayload = await googleResponse.json();
-  const annotation = googlePayload?.responses?.[0];
-  if (annotation?.error) return response({ error: 'provider_failed' }, 502);
-  const detection = (annotation?.webDetection ?? {}) as WebDetection;
 
-  const { data: approvedRows, error: approvedError } = await admin
-    .from('brand_source_domains')
-    .select('domain, brand, source_kind, license, license_url');
-  if (approvedError) return response({ error: 'lookup_failed' }, 500);
-  const approvedDomains = (approvedRows ?? []) as ApprovedDomain[];
   const detectionSignals =
     `${recognizedText} ${webDetectionSignals(detection)}`.trim();
   const googleWebCandidates = candidatesFromWebDetection(
     detection,
     approvedDomains,
   );
-  const recognizedOcrBrand = approvedDomains.find(
-    ({ brand, source_kind }) =>
-      source_kind === 'manufacturer' &&
-      normalizeWebText(recognizedText).includes(normalizeWebText(brand)),
-  );
   const recognizedBrand = approvedDomains.find(
     ({ brand, source_kind }) =>
       source_kind === 'manufacturer' &&
       normalizeWebText(detectionSignals).includes(normalizeWebText(brand)),
   );
+  const retailerHints = recognizedBrand
+    ? retailerIdentityHintsFromWebDetection(
+        detection,
+        discoveryDomains,
+        recognizedBrand.brand,
+      )
+    : [];
   const sitemapPage =
     !googleWebCandidates.length && recognizedBrand
       ? await discoverManufacturerPage(
           approvedDomains,
           recognizedBrand.brand,
-          detectionSignals,
+          `${detectionSignals} ${retailerHints.join(' ')}`,
         )
       : null;
   const googleCandidates = [
     ...googleWebCandidates,
-    ...(sitemapPage
-      ? [
-          {
-            id: `manufacturer-sitemap:${compactText(sitemapPage.sourceUrl)}`,
-            name: sitemapPage.name,
-            brand: sitemapPage.brand,
-            category: null,
-            imageUrl: sitemapPage.imageUrl,
-            sourceUrl: sitemapPage.sourceUrl,
-            sourceDomain: sitemapPage.sourceDomain,
-            sourceKind: sitemapPage.sourceKind,
-            sourceLicense: sitemapPage.sourceLicense,
-            sourceLicenseUrl: sitemapPage.sourceLicenseUrl,
-            score: 0.72,
-          },
-        ]
-      : []),
+    ...(sitemapPage ? [manufacturerCandidate(sitemapPage)] : []),
   ].filter(
     (candidate) =>
       !recognizedOcrBrand ||
@@ -349,21 +438,69 @@ Deno.serve(async (request) => {
     'not_configured' | 'not_needed' | 'success' | 'no_match' | 'unavailable' =
     serpApiKey ? 'not_needed' : 'not_configured';
   let serpApiCandidates: ReturnType<typeof candidatesFromWebDetection> = [];
+  let serpApiRetailerHints: string[] = [];
   let serpApiError: SerpApiSearchError['code'] | null = null;
   if (!normalizedGoogleCandidates.length && recognizedText.trim()) {
     if (serpApiKey) {
       try {
-        serpApiCandidates = await searchSerpApiProductImages(
-          serpApiKey,
-          recognizedText,
-          approvedDomains,
+        const primaryRequestId = `${requestId}:serpapi:primary`;
+        const primaryBudget = await consumeSerpApiBudget(
+          admin,
+          user.id,
+          primaryRequestId,
         );
-        if (!serpApiCandidates.length && identifier) {
-          serpApiCandidates = await searchSerpApiProductImages(
-            serpApiKey,
-            `${recognizedText} ${identifier}`,
-            approvedDomains,
+        if (!primaryBudget.allowed) {
+          throw new SerpApiSearchError(
+            primaryBudget.reason === 'quota_reached' ||
+              primaryBudget.reason === 'global_quota_reached'
+              ? 'quota'
+              : 'provider',
           );
+        }
+        const primaryStartedAt = Date.now();
+        try {
+          const serpApiResult = await searchSerpApiProductImages(
+            serpApiKey,
+            recognizedText,
+            approvedDomains,
+            discoveryDomains,
+            (recognizedOcrBrand ?? recognizedBrand)?.brand ?? '',
+          );
+          serpApiCandidates = serpApiResult.candidates;
+          serpApiRetailerHints = serpApiResult.retailerHints;
+          if (
+            !serpApiCandidates.length &&
+            serpApiRetailerHints.length &&
+            (recognizedOcrBrand ?? recognizedBrand)
+          ) {
+            const hintedBrand = (recognizedOcrBrand ?? recognizedBrand)!;
+            const hintedPage = await discoverManufacturerPage(
+              approvedDomains,
+              hintedBrand.brand,
+              `${recognizedText} ${serpApiRetailerHints.join(' ')}`,
+            );
+            if (hintedPage) {
+              serpApiCandidates = [manufacturerCandidate(hintedPage)];
+            }
+          }
+          await recordProviderUsageOutcome(
+            admin,
+            'serpapi',
+            user.id,
+            primaryRequestId,
+            'success',
+            primaryStartedAt,
+          );
+        } catch (error) {
+          await recordProviderUsageOutcome(
+            admin,
+            'serpapi',
+            user.id,
+            primaryRequestId,
+            error instanceof SerpApiSearchError ? error.code : 'provider_error',
+            primaryStartedAt,
+          );
+          throw error;
         }
         serpApiStatus = serpApiCandidates.length ? 'success' : 'no_match';
       } catch (error) {
@@ -463,6 +600,13 @@ Deno.serve(async (request) => {
   if (serpApiStatus === 'unavailable' && !normalizedGoogleCandidates.length) {
     return response({ error: 'provider_unavailable' }, 503);
   }
+  if (
+    googleProviderError &&
+    serpApiStatus === 'not_configured' &&
+    !normalizedGoogleCandidates.length
+  ) {
+    return response({ error: googleProviderError }, 503);
+  }
 
   return response({
     matches,
@@ -473,6 +617,7 @@ Deno.serve(async (request) => {
       normalizedSerpApiCandidateCount: normalizedSerpApiCandidates.length,
       serpApiStatus,
       catalogueCandidateCount: catalogueMatches.length,
+      retailerHintCount: retailerHints.length + serpApiRetailerHints.length,
       ...(diagnosticsEnabled
         ? {
             providerDiagnostics: {

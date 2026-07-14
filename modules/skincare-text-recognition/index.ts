@@ -1,6 +1,7 @@
 import { requireOptionalNativeModule } from 'expo-modules-core';
 
 export type SkincareTextRecognitionNativeModule = {
+  isLiveDataScannerSupported: boolean;
   recognizeText(imageUri: string): Promise<
     | string[]
     | {
