@@ -33,7 +33,9 @@ function tokens(value: string) {
     oil: ['huile'],
     sunscreen: ['solaire'],
   };
-  const raw = normalizeWebText(value).split(' ');
+  const raw = normalizeWebText(value)
+    .replace(/\bspf\s+(\d+)\b/g, 'spf$1')
+    .split(' ');
   return [
     ...new Set(raw.flatMap((token) => [token, ...(aliases[token] ?? [])])),
   ].filter((token) => token.length >= 3 && !ignoredTokens.has(token));
@@ -69,16 +71,28 @@ export function rankManufacturerUrls(urls: string[], query: string) {
     .map(({ url }) => url);
 }
 
+export function manufacturerSitemapUrls(domain: string) {
+  const normalized = domain.toLocaleLowerCase('en-US').replace(/^www\./, '');
+  return [
+    `https://www.${normalized}/sitemap.xml`,
+    `https://${normalized}/sitemap.xml`,
+  ];
+}
+
 async function sitemapUrls(domain: string) {
-  const response = await fetch(`https://${domain}/sitemap.xml`, {
-    headers: { 'User-Agent': 'SkincareApp/1.0 product data enrichment' },
-    signal: AbortSignal.timeout(6_000),
-  }).catch(() => null);
-  if (!response?.ok) return [];
-  const xml = (await response.text()).slice(0, 2_000_000);
-  return [...xml.matchAll(/<loc>\s*([^<]+)\s*<\/loc>/gi)].map((match) =>
-    match[1].replace(/&amp;/g, '&').trim(),
-  );
+  for (const sitemapUrl of manufacturerSitemapUrls(domain)) {
+    const response = await fetch(sitemapUrl, {
+      headers: { 'User-Agent': 'SkincareApp/1.0 product data enrichment' },
+      signal: AbortSignal.timeout(6_000),
+    }).catch(() => null);
+    if (!response?.ok) continue;
+    const xml = (await response.text()).slice(0, 2_000_000);
+    const urls = [...xml.matchAll(/<loc>\s*([^<]+)\s*<\/loc>/gi)].map((match) =>
+      match[1].replace(/&amp;/g, '&').trim(),
+    );
+    if (urls.length) return urls;
+  }
+  return [];
 }
 
 export async function discoverManufacturerPage(

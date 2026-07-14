@@ -82,4 +82,85 @@ describe('SQLiteProductRepository', () => {
       expect.any(String),
     );
   });
+
+  it('saves the product, identifier, and ingredients in one transaction', async () => {
+    const db = {
+      getFirstAsync: jest.fn().mockResolvedValue(null),
+      runAsync: jest.fn().mockResolvedValue(undefined),
+      withTransactionAsync: jest.fn(async (task: () => Promise<void>) =>
+        task(),
+      ),
+    };
+    const repository = new SQLiteProductRepository(
+      jest.fn().mockResolvedValue(db) as never,
+    );
+
+    await repository.saveProduct({
+      name: 'Sérum test',
+      brand: 'Marque',
+      category: 'Sérum',
+      barcode: '12345670',
+      imageUrl: '',
+      imageSource: '',
+      imageSourceUrl: '',
+      imageLicense: '',
+      imageLicenseUrl: '',
+      ingredientsText: 'Aqua, Glycerin',
+      ingredientsSource: 'Fabricant',
+      ingredientsSourceUrl: 'https://example.com',
+      source: 'barcode',
+    });
+
+    expect(db.withTransactionAsync).toHaveBeenCalledTimes(1);
+    expect(db.runAsync).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO product_ingredients'),
+      expect.any(String),
+      'aqua',
+      0,
+      'Aqua',
+    );
+  });
+
+  it('replaces a stale local barcode result with the corrected shared variant', async () => {
+    const db = {
+      getFirstAsync: jest.fn().mockResolvedValue(productRows[0]),
+      runAsync: jest.fn().mockResolvedValue(undefined),
+      withTransactionAsync: jest.fn(async (task: () => Promise<void>) =>
+        task(),
+      ),
+    };
+    const repository = new SQLiteProductRepository(
+      jest.fn().mockResolvedValue(db) as never,
+    );
+
+    const result = await repository.saveProduct({
+      name: 'Crème Hydratante Visage SPF30',
+      brand: 'CeraVe',
+      category: 'Protection solaire',
+      barcode: '12345678',
+      imageUrl: 'https://example.com/spf30.webp',
+      imageSource: 'CeraVe',
+      imageSourceUrl: 'https://example.com/spf30',
+      imageLicense: '',
+      imageLicenseUrl: '',
+      ingredientsText: 'Aqua, Glycerin',
+      ingredientsSource: 'CeraVe',
+      ingredientsSourceUrl: 'https://example.com/spf30',
+      source: 'barcode',
+    });
+
+    expect(result).toMatchObject({
+      created: false,
+      product: {
+        id: 'cleanser',
+        name: 'Crème Hydratante Visage SPF30',
+        category: 'Protection solaire',
+      },
+    });
+    expect(
+      db.runAsync.mock.calls.some(([statement]) =>
+        String(statement).includes('UPDATE products'),
+      ),
+    ).toBe(true);
+  });
 });

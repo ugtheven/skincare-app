@@ -203,13 +203,30 @@ function isLineOnProduct(line: RecognizedProductTextLine): boolean {
 
 function cleanRecognizedBrand(value: string): string {
   const cleaned = cleanRecognizedLine(value).replace(/\s*[=–—]\s*/g, '-');
-  const canonicalBrands: Record<string, string> = {
-    'aroma zone': 'AROMA-ZONE',
-    cerave: 'CeraVe',
-    eucerin: 'Eucerin',
-    schwarzkopf: 'Schwarzkopf',
-  };
-  return canonicalBrands[normalizeProductText(cleaned)] ?? cleaned;
+  return canonicalBrandInLine(cleaned) ?? cleaned;
+}
+
+const CANONICAL_BRANDS: readonly [normalized: string, canonical: string][] = [
+  ['aroma zone', 'AROMA-ZONE'],
+  ['cerave', 'CeraVe'],
+  ['eucerin', 'Eucerin'],
+  ['schwarzkopf', 'Schwarzkopf'],
+];
+
+function canonicalBrandInLine(value: string): string | null {
+  const normalized = ` ${normalizeProductText(value)} `;
+  return (
+    CANONICAL_BRANDS.find(([brand]) =>
+      normalized.includes(` ${brand} `),
+    )?.[1] ?? null
+  );
+}
+
+function isGenericProductIdentity(value: string): boolean {
+  const normalized = normalizeProductText(value);
+  return /^(?:cream|creme|gel|hydratant(?:e)?|lait|lotion|moisturizer|serum|sunscreen)(?:\b|$)/.test(
+    normalized,
+  );
 }
 
 function isPackagingDetailLine(value: string): boolean {
@@ -385,10 +402,25 @@ function recognizedIdentityLines(lines: RecognizedProductTextInput[]): {
       (line) =>
         isLineOnProduct(line) && /[a-z]/.test(normalizeProductText(line.text)),
     );
-  const brandIndex = usefulLines.findIndex(
+  const canonicalBrandIndex = usefulLines.findIndex((line) =>
+    Boolean(canonicalBrandInLine(line.text)),
+  );
+  const firstIdentityIndex = usefulLines.findIndex(
     (line) => !isPackagingDetailLine(line.text),
   );
-  const brand = cleanRecognizedBrand(usefulLines[brandIndex]?.text ?? '');
+  const brandIndex =
+    canonicalBrandIndex >= 0
+      ? canonicalBrandIndex
+      : firstIdentityIndex >= 0 &&
+          !isGenericProductIdentity(usefulLines[firstIdentityIndex].text)
+        ? firstIdentityIndex
+        : -1;
+  const brand =
+    canonicalBrandIndex >= 0
+      ? (canonicalBrandInLine(usefulLines[canonicalBrandIndex].text) ?? '')
+      : brandIndex >= 0
+        ? cleanRecognizedBrand(usefulLines[brandIndex].text)
+        : '';
   const name = buildRecognizedProductName(usefulLines, brandIndex);
 
   return { brand, name };
@@ -403,6 +435,7 @@ export function productLookupTextFromRecognizedText(
 }
 
 const GENERIC_IDENTITY_TOKENS = new Set([
+  'am',
   'concentre',
   'concentree',
   'cream',
@@ -414,10 +447,61 @@ const GENERIC_IDENTITY_TOKENS = new Set([
   'lotion',
   'naturel',
   'naturelle',
+  'pm',
   'serum',
 ]);
 
+function criticalProductVariants(value: string) {
+  const normalized = normalizeProductText(value);
+  const spf = [...normalized.matchAll(/\bspf(\d{1,3})\b/g)].map(
+    ([, level]) => `spf${Number(level)}`,
+  );
+  const percentages = [
+    ...value
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .matchAll(/\b(\d+(?:[.,]\d+)?)\s*%/g),
+  ].map(([, amount]) => `pct${amount.replace(',', '.')}`);
+  return [...new Set([...spf, ...percentages])].sort();
+}
+
+export function criticalProductVariantsMatch(
+  query: string,
+  candidateName: string,
+) {
+  const queryVariants = criticalProductVariants(query);
+  const candidateVariants = criticalProductVariants(candidateName);
+  const querySpf = queryVariants.filter((variant) => variant.startsWith('spf'));
+  const candidateSpf = candidateVariants.filter((variant) =>
+    variant.startsWith('spf'),
+  );
+  const queryPercentages = queryVariants.filter((variant) =>
+    variant.startsWith('pct'),
+  );
+  const candidatePercentages = candidateVariants.filter((variant) =>
+    variant.startsWith('pct'),
+  );
+  return (
+    querySpf.length === candidateSpf.length &&
+    querySpf.every((variant, index) => candidateSpf[index] === variant) &&
+    (!queryPercentages.length ||
+      (queryPercentages.length === candidatePercentages.length &&
+        queryPercentages.every(
+          (variant, index) => candidatePercentages[index] === variant,
+        )))
+  );
+}
+
 function candidateMatchEvidence(text: string, candidate: ProductCandidate) {
+  if (!criticalProductVariantsMatch(text, candidate.name)) {
+    return {
+      brandCoverage: 0,
+      identityMatches: 0,
+      phraseMatches: false,
+      queryIdentityCount: 0,
+      score: 0,
+    };
+  }
   const queryTokens = productTextTokens(text);
   const brandTokens = productTextTokens(candidate.brand ?? '');
   const candidateNameTokens = productTextTokens(candidate.name);
@@ -623,7 +707,7 @@ export function manualDraftFromRecognizedText(
 
   return {
     ...emptyProductDraft,
-    name: identity.brand,
+    brand: identity.brand,
     category: inferProductCategory(text),
   };
 }

@@ -6,6 +6,11 @@ export type ApprovedDomain = {
   license_url: string | null;
 };
 
+export type DiscoveryDomain = {
+  domain: string;
+  source_kind: 'retailer' | 'pharmacy';
+};
+
 export type WebImage = { url?: string; score?: number };
 export type WebPage = {
   url?: string;
@@ -45,7 +50,52 @@ export function normalizeWebText(value: string) {
     .replace(/\s+/g, ' ');
 }
 
+function criticalProductVariants(value: string) {
+  const normalized = normalizeWebText(value).replace(
+    /\bspf\s+(\d{1,3})\b/g,
+    'spf$1',
+  );
+  const spf = [...normalized.matchAll(/\bspf(\d{1,3})\b/g)].map(
+    ([, level]) => `spf${Number(level)}`,
+  );
+  const percentages = [
+    ...value
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .matchAll(/\b(\d+(?:[.,]\d+)?)\s*%/g),
+  ].map(([, amount]) => `pct${amount.replace(',', '.')}`);
+  return [...new Set([...spf, ...percentages])].sort();
+}
+
+export function criticalProductVariantsMatch(
+  query: string,
+  candidateName: string,
+) {
+  const queryVariants = criticalProductVariants(query);
+  const candidateVariants = criticalProductVariants(candidateName);
+  const querySpf = queryVariants.filter((variant) => variant.startsWith('spf'));
+  const candidateSpf = candidateVariants.filter((variant) =>
+    variant.startsWith('spf'),
+  );
+  const queryPercentages = queryVariants.filter((variant) =>
+    variant.startsWith('pct'),
+  );
+  const candidatePercentages = candidateVariants.filter((variant) =>
+    variant.startsWith('pct'),
+  );
+  return (
+    querySpf.length === candidateSpf.length &&
+    querySpf.every((variant, index) => candidateSpf[index] === variant) &&
+    (!queryPercentages.length ||
+      (queryPercentages.length === candidatePercentages.length &&
+        queryPercentages.every(
+          (variant, index) => candidatePercentages[index] === variant,
+        )))
+  );
+}
+
 const genericProductTokens = new Set([
+  'am',
   'and',
   'avec',
   'beauty',
@@ -58,6 +108,7 @@ const genericProductTokens = new Set([
   'gel',
   'lait',
   'lotion',
+  'pm',
   'product',
   'produit',
   'serum',
@@ -69,7 +120,11 @@ const genericProductTokens = new Set([
 
 function productTokens(value: string, brand = '') {
   const brandTokens = new Set(normalizeWebText(brand).split(' '));
-  return [...new Set(normalizeWebText(value).split(' '))].filter(
+  const normalized = normalizeWebText(value).replace(
+    /\bspf\s+(\d{1,3})\b/g,
+    'spf$1',
+  );
+  return [...new Set(normalized.split(' '))].filter(
     (token) =>
       token.length >= 2 &&
       !genericProductTokens.has(token) &&
@@ -125,6 +180,7 @@ export function visualProductIdentityOverlap(
   candidate: string,
   brand: string,
 ) {
+  if (!criticalProductVariantsMatch(query, candidate)) return 0;
   const queryTokens = productTokens(query, brand);
   const candidateTokens = productTokens(candidate, brand);
   const shared = queryTokens.filter((queryToken) =>
@@ -164,6 +220,37 @@ export function matchingApprovedDomain(
         host.endsWith(`.${domain.toLocaleLowerCase('en-US')}`),
     ) ?? null
   );
+}
+
+export function retailerIdentityHintsFromWebDetection(
+  detection: WebDetection,
+  discoveryDomains: DiscoveryDomain[],
+  recognizedBrand: string,
+) {
+  const normalizedBrand = normalizeWebText(recognizedBrand);
+  if (!normalizedBrand) return [];
+
+  const hints = (detection.pagesWithMatchingImages ?? []).flatMap((page) => {
+    if (!page.url || !page.pageTitle) return [];
+    const host = hostname(page.url);
+    if (
+      !host ||
+      !discoveryDomains.some(
+        ({ domain }) =>
+          host === domain.toLocaleLowerCase('en-US') ||
+          host.endsWith(`.${domain.toLocaleLowerCase('en-US')}`),
+      )
+    ) {
+      return [];
+    }
+    const title = page.pageTitle
+      .replace(/<[^>]*>/g, ' ')
+      .trim()
+      .slice(0, 240);
+    return normalizeWebText(title).includes(normalizedBrand) ? [title] : [];
+  });
+
+  return [...new Set(hints)].slice(0, 5);
 }
 
 function cleanPageTitle(title: string, brand: string) {

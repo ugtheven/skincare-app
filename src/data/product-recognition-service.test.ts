@@ -2,6 +2,8 @@ import type { Product, ProductDraft } from '@/domain/product';
 import type { ProductCandidate } from '@/domain/product-recognition';
 
 import {
+  barcodeDraftNeedsEnrichment,
+  mergeBarcodeEnrichment,
   recognizeProductBarcode,
   recognizeProductPhoto,
   type BarcodeRecognitionDependencies,
@@ -215,9 +217,14 @@ function barcodeDependencies(
 }
 
 describe('recognizeProductBarcode', () => {
-  it('stops after a local cache hit', async () => {
+  it('uses a complete local cache hit after shared validation', async () => {
+    const completeLocalProduct = {
+      ...localProduct,
+      imageUrl: 'https://example.com/product.webp',
+      ingredientsText: 'Aqua, Glycerin',
+    };
     const dependencies = barcodeDependencies({
-      findLocal: jest.fn().mockResolvedValue(localProduct),
+      findLocal: jest.fn().mockResolvedValue(completeLocalProduct),
     });
 
     const result = await recognizeProductBarcode(
@@ -225,9 +232,29 @@ describe('recognizeProductBarcode', () => {
       dependencies,
     );
 
-    expect(result).toEqual({ kind: 'local', product: localProduct });
-    expect(dependencies.lookupShared).not.toHaveBeenCalled();
+    expect(result).toEqual({ kind: 'local', product: completeLocalProduct });
+    expect(dependencies.lookupShared).toHaveBeenCalledTimes(1);
     expect(dependencies.lookupPublic).not.toHaveBeenCalled();
+  });
+
+  it('refreshes an incomplete local binding from the shared catalogue', async () => {
+    const correctedDraft = {
+      ...barcodeDraft,
+      name: 'Crème Hydratante Visage SPF30',
+      barcode: '3612623961421',
+    };
+    const dependencies = barcodeDependencies({
+      findLocal: jest.fn().mockResolvedValue(localProduct),
+      lookupShared: jest.fn().mockResolvedValue(correctedDraft),
+    });
+
+    expect(
+      await recognizeProductBarcode('3612623961421', dependencies),
+    ).toEqual({
+      kind: 'draft',
+      draft: correctedDraft,
+      provider: 'shared',
+    });
   });
 
   it('uses the shared catalogue before the public provider', async () => {
@@ -240,7 +267,11 @@ describe('recognizeProductBarcode', () => {
       dependencies,
     );
 
-    expect(result).toEqual({ kind: 'draft', draft: barcodeDraft });
+    expect(result).toEqual({
+      kind: 'draft',
+      draft: barcodeDraft,
+      provider: 'shared',
+    });
     expect(dependencies.lookupPublic).not.toHaveBeenCalled();
   });
 
@@ -264,7 +295,11 @@ describe('recognizeProductBarcode', () => {
       lookupPublic: jest.fn().mockResolvedValue(barcodeDraft),
     });
 
-    expect(result).toEqual({ kind: 'draft', draft: barcodeDraft });
+    expect(result).toEqual({
+      kind: 'draft',
+      draft: barcodeDraft,
+      provider: 'public',
+    });
   });
 
   it('does not send a short manufacturer code to the public GTIN provider', async () => {
@@ -293,5 +328,44 @@ describe('recognizeProductBarcode', () => {
 
     expect(miss).toEqual({ kind: 'not_found' });
     expect(unavailable).toEqual({ kind: 'lookup_unavailable' });
+  });
+});
+
+describe('barcode enrichment', () => {
+  it('fills image and ingredients without overwriting edited identity fields', () => {
+    const current = {
+      ...barcodeDraft,
+      name: 'Nom corrigé par la personne',
+      category: 'Hydratant',
+    };
+    const enriched = {
+      ...barcodeDraft,
+      name: 'Lait Hydratant',
+      category: 'Autre',
+      imageUrl: 'https://example.com/cerave.webp',
+      imageSource: 'CeraVe',
+      imageSourceUrl: 'https://example.com/cerave',
+      ingredientsText: 'Aqua, Glycerin, Ceramide NP',
+      ingredientsSource: 'CeraVe',
+      ingredientsSourceUrl: 'https://example.com/cerave',
+    };
+
+    expect(mergeBarcodeEnrichment(current, enriched)).toMatchObject({
+      name: 'Nom corrigé par la personne',
+      category: 'Hydratant',
+      imageUrl: 'https://example.com/cerave.webp',
+      ingredientsText: 'Aqua, Glycerin, Ceramide NP',
+    });
+  });
+
+  it('stops refreshing only after both useful fields are available', () => {
+    expect(barcodeDraftNeedsEnrichment(barcodeDraft)).toBe(true);
+    expect(
+      barcodeDraftNeedsEnrichment({
+        ...barcodeDraft,
+        imageUrl: 'https://example.com/cerave.webp',
+        ingredientsText: 'Aqua, Glycerin, Ceramide NP',
+      }),
+    ).toBe(false);
   });
 });

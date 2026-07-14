@@ -1,10 +1,38 @@
 import ExpoModulesCore
 import UIKit
 import Vision
+import VisionKit
 
 public final class SkincareTextRecognitionModule: Module {
   public func definition() -> ModuleDefinition {
     Name("SkincareTextRecognition")
+
+    Constant("isLiveDataScannerSupported") {
+      if #available(iOS 16.0, *) {
+        return true
+      }
+      return false
+    }
+
+    View(SkincareDataScannerView.self) {
+      Events("onItemsChanged", "onError")
+
+      Prop("active") { (view, active: Bool) in
+        view.setActive(active)
+      }
+
+      Prop("mode") { (view, mode: String) in
+        view.setMode(mode)
+      }
+
+      Prop("highlightedItemIds") { (view, itemIds: [String]) in
+        view.setHighlightedItemIds(itemIds)
+      }
+
+      Prop("confirmed") { (view, confirmed: Bool) in
+        view.setConfirmed(confirmed)
+      }
+    }
 
     AsyncFunction("recognizeText") { (imageUri: String) throws -> [[String: Any]] in
       let imageUrl: URL

@@ -4,20 +4,15 @@ import {
 } from 'https://esm.sh/@supabase/supabase-js@2';
 
 import { controlledProductCategory } from '../_shared/product-category.ts';
-import { consumeGoogleVisionBudget } from '../_shared/google-vision-budget.ts';
 import {
   ensureNormalizedProductImage,
   normalizeSourceImage,
   type NormalizedProductImage,
 } from '../_shared/product-image.ts';
+import { persistStructuredFormula } from '../_shared/product-ingredients.ts';
 import {
-  fetchIngredientList,
-  persistStructuredFormula,
-} from '../_shared/product-ingredients.ts';
-import {
+  criticalProductVariantsMatch,
   type ApprovedDomain,
-  candidatesFromWebDetection,
-  type WebDetection,
 } from '../_shared/visual-lookup.ts';
 import { discoverManufacturerPage } from '../_shared/manufacturer-discovery.ts';
 import { isValidGtin } from '../_shared/product-identifier.ts';
@@ -66,98 +61,6 @@ function normalizeText(value: string) {
     .replace(/\s+/g, ' ');
 }
 
-async function googleManufacturerEnrichment(
-  admin: SupabaseClient<any>,
-  input: {
-    productId: string;
-    imageUrl: string;
-    brand: string;
-    name: string;
-  },
-) {
-  const apiKey = Deno.env.get('GOOGLE_CLOUD_VISION_API_KEY');
-  if (!apiKey || !input.imageUrl) return null;
-  const googleResponse = await fetch(
-    `https://vision.googleapis.com/v1/images:annotate?key=${encodeURIComponent(apiKey)}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        requests: [
-          {
-            image: { source: { imageUri: input.imageUrl } },
-            features: [{ type: 'WEB_DETECTION', maxResults: 10 }],
-          },
-        ],
-      }),
-      signal: AbortSignal.timeout(8_000),
-    },
-  ).catch(() => null);
-  if (!googleResponse?.ok) return null;
-  const googlePayload = await googleResponse.json().catch(() => null);
-  const detection = googlePayload?.responses?.[0]?.webDetection as
-    WebDetection | undefined;
-  if (!detection) return null;
-  const { data: domains } = await admin
-    .from('brand_source_domains')
-    .select('domain, brand, source_kind, license, license_url');
-  const candidates = candidatesFromWebDetection(
-    detection,
-    (domains ?? []) as ApprovedDomain[],
-  );
-  const expectedBrand = normalizeText(input.brand);
-  const candidate =
-    candidates.find(
-      ({ brand }) =>
-        normalizeText(brand) === expectedBrand ||
-        normalizeText(brand).includes(expectedBrand) ||
-        expectedBrand.includes(normalizeText(brand)),
-    ) ?? candidates[0];
-  if (!candidate?.imageUrl) return null;
-
-  const image = await normalizeSourceImage(
-    admin,
-    {
-      domain: candidate.sourceDomain,
-      sourceKind: candidate.sourceKind,
-      sourceUrl: candidate.imageUrl,
-      sourcePageUrl: candidate.sourceUrl,
-      sourceName: candidate.brand,
-      license: candidate.sourceLicense,
-      licenseUrl: candidate.sourceLicenseUrl,
-    },
-    input.productId,
-  );
-  if (!image) return null;
-  const ingredientsText = await fetchIngredientList(candidate.sourceUrl);
-  if (ingredientsText) {
-    await persistStructuredFormula(admin, {
-      productId: input.productId,
-      ingredientsText,
-      sourceProvider: candidate.brand,
-      sourceUrl: candidate.sourceUrl,
-      confidence: 85,
-    });
-  }
-  await admin.from('product_sources').upsert(
-    {
-      product_id: input.productId,
-      provider: 'google_manufacturer_page',
-      provider_product_id: candidate.sourceUrl,
-      source_url: candidate.sourceUrl,
-      license: candidate.sourceLicense,
-      fetched_at: new Date().toISOString(),
-    },
-    { onConflict: 'provider,provider_product_id' },
-  );
-  return {
-    image,
-    ingredientsText,
-    name: candidate.name,
-    sourceUrl: candidate.sourceUrl,
-  };
-}
-
 async function sitemapManufacturerEnrichment(
   admin: SupabaseClient<any>,
   input: { productId: string; brand: string; name: string },
@@ -171,6 +74,15 @@ async function sitemapManufacturerEnrichment(
     input.name,
   );
   if (!page) return null;
+  if (page.ingredientsText) {
+    await persistStructuredFormula(admin, {
+      productId: input.productId,
+      ingredientsText: page.ingredientsText,
+      sourceProvider: page.brand,
+      sourceUrl: page.sourceUrl,
+      confidence: 85,
+    });
+  }
   const image = await normalizeSourceImage(
     admin,
     {
@@ -184,16 +96,6 @@ async function sitemapManufacturerEnrichment(
     },
     input.productId,
   );
-  if (!image) return null;
-  if (page.ingredientsText) {
-    await persistStructuredFormula(admin, {
-      productId: input.productId,
-      ingredientsText: page.ingredientsText,
-      sourceProvider: page.brand,
-      sourceUrl: page.sourceUrl,
-      confidence: 85,
-    });
-  }
   await admin.from('product_sources').upsert(
     {
       product_id: input.productId,
@@ -215,6 +117,7 @@ async function sitemapManufacturerEnrichment(
 
 function textTokens(value: string) {
   const ignored = new Set([
+    'am',
     'and',
     'avec',
     'aux',
@@ -222,13 +125,18 @@ function textTokens(value: string) {
     'le',
     'les',
     'ml',
+    'pm',
     'pour',
     'skin',
     'soin',
     'the',
     'visage',
   ]);
-  return [...new Set(normalizeText(value).split(' '))]
+  const normalized = normalizeText(value).replace(
+    /\bspf\s+(\d{1,3})\b/g,
+    'spf$1',
+  );
+  return [...new Set(normalized.split(' '))]
     .filter(
       (token) =>
         token.length >= 2 &&
@@ -251,6 +159,7 @@ function scoreTextMatch(value: string, product: ProductRow) {
       product.canonical_name,
       ...(product.product_aliases ?? []).map(({ alias }) => alias),
     ].map((name) => {
+      if (!criticalProductVariantsMatch(value, name)) return 0;
       const candidate = [product.brand, name].filter(Boolean).join(' ');
       const candidateTokens = textTokens(candidate);
       if (!candidateTokens.length) return 0;
@@ -322,7 +231,9 @@ Deno.serve(async (request) => {
 
   const { mode, value } = await request.json().catch(() => ({}));
   if (
-    (mode !== 'identifier' && mode !== 'text') ||
+    (mode !== 'identifier' &&
+      mode !== 'identifier_refresh' &&
+      mode !== 'text') ||
     typeof value !== 'string' ||
     !value.trim()
   ) {
@@ -331,6 +242,7 @@ Deno.serve(async (request) => {
       { status: 400, headers: corsHeaders },
     );
   }
+  const refreshOnly = mode === 'identifier_refresh';
 
   const authorization = request.headers.get('Authorization');
   const admin = createClient(
@@ -437,7 +349,25 @@ Deno.serve(async (request) => {
       admin,
       existingProduct,
       query,
+      undefined,
+      refreshOnly !== true,
     );
+    const hasApprovedFormula = (existingProduct.product_formulas ?? []).some(
+      ({ status }) => status === 'approved',
+    );
+    if (
+      !refreshOnly &&
+      existingProduct.brand &&
+      (!image || !hasApprovedFormula)
+    ) {
+      EdgeRuntime.waitUntil(
+        sitemapManufacturerEnrichment(admin, {
+          productId: existingProduct.id,
+          brand: existingProduct.brand,
+          name: existingProduct.canonical_name,
+        }).catch(() => undefined),
+      );
+    }
     return Response.json(
       { matches: [toResponse(existingProduct, undefined, image)] },
       { headers: corsHeaders },
@@ -462,6 +392,14 @@ Deno.serve(async (request) => {
       signal: AbortSignal.timeout(8_000),
     },
   );
+  if (upstream.status === 404) {
+    await admin.from('lookup_cache').upsert({
+      lookup_key: `identifier:${query}`,
+      result_kind: 'miss',
+      expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+    return Response.json({ matches: [] }, { headers: corsHeaders });
+  }
   if (!upstream.ok) {
     return Response.json(
       { error: 'provider_unavailable' },
@@ -578,25 +516,11 @@ Deno.serve(async (request) => {
     payload.product.image_front_url || payload.product.image_url || '';
   EdgeRuntime.waitUntil(
     (async () => {
-      const googleBudget = upstreamImageUrl
-        ? await consumeGoogleVisionBudget(admin, user.id)
-        : { allowed: false as const };
-      const googleManufacturer =
-        upstreamImageUrl && googleBudget.allowed
-          ? await googleManufacturerEnrichment(admin, {
-              productId: product.id,
-              imageUrl: upstreamImageUrl,
-              brand: payload.product.brands?.trim() || '',
-              name: productName,
-            })
-          : null;
-      const manufacturer =
-        googleManufacturer ??
-        (await sitemapManufacturerEnrichment(admin, {
-          productId: product.id,
-          brand: payload.product.brands?.trim() || '',
-          name: productName,
-        }));
+      const manufacturer = await sitemapManufacturerEnrichment(admin, {
+        productId: product.id,
+        brand: payload.product.brands?.trim() || '',
+        name: productName,
+      });
       if (manufacturer?.name && manufacturer.name !== product.canonical_name) {
         await admin.from('product_aliases').upsert(
           {

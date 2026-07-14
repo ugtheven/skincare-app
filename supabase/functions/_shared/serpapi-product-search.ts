@@ -1,5 +1,6 @@
 import {
   type ApprovedDomain,
+  type DiscoveryDomain,
   matchingApprovedDomain,
   normalizeWebText,
   visualProductIdentityOverlap,
@@ -144,12 +145,46 @@ export function candidatesFromSerpApiImages(
     .slice(0, 3);
 }
 
+export function retailerIdentityHintsFromSerpApiImages(
+  payload: SerpApiImagesPayload,
+  discoveryDomains: DiscoveryDomain[],
+  recognizedBrand: string,
+) {
+  const normalizedBrand = normalizeWebText(recognizedBrand);
+  if (!normalizedBrand) return [];
+  const hints = (payload.images_results ?? []).flatMap((result) => {
+    if (!result.link || !result.title) return [];
+    let host = '';
+    try {
+      const url = new URL(result.link);
+      if (url.protocol !== 'https:') return [];
+      host = url.hostname.toLocaleLowerCase('en-US').replace(/^www\./, '');
+    } catch {
+      return [];
+    }
+    if (
+      !discoveryDomains.some(
+        ({ domain }) =>
+          host === domain.toLocaleLowerCase('en-US') ||
+          host.endsWith(`.${domain.toLocaleLowerCase('en-US')}`),
+      ) ||
+      !normalizeWebText(result.title).includes(normalizedBrand)
+    ) {
+      return [];
+    }
+    return [result.title.trim().slice(0, 240)];
+  });
+  return [...new Set(hints)].slice(0, 5);
+}
+
 export async function searchSerpApiProductImages(
   apiKey: string,
   query: string,
   approvedDomains: ApprovedDomain[],
+  discoveryDomains: DiscoveryDomain[] = [],
+  recognizedBrand = '',
 ) {
-  if (!query.trim()) return [];
+  if (!query.trim()) return { candidates: [], retailerHints: [] };
   let response: Response;
   try {
     response = await fetch(serpApiGoogleImagesUrl(apiKey, query), {
@@ -178,5 +213,12 @@ export async function searchSerpApiProductImages(
           : 'provider',
     );
   }
-  return candidatesFromSerpApiImages(payload, approvedDomains, query);
+  return {
+    candidates: candidatesFromSerpApiImages(payload, approvedDomains, query),
+    retailerHints: retailerIdentityHintsFromSerpApiImages(
+      payload,
+      discoveryDomains,
+      recognizedBrand,
+    ),
+  };
 }

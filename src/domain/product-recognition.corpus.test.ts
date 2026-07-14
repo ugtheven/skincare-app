@@ -114,6 +114,7 @@ const corpus: {
   {
     id: 'cerave-am-face-moisturizer-spf30',
     lines: [
+      line('Sérum', { x: 0.2, y: 0.82 }),
       line('Cerave', { height: 0.05 }),
       line('DEVELOPED WITH DERMATOLOGISTS'),
       line('Feuchtigkeits-'),
@@ -179,5 +180,22 @@ describe('real packaging OCR regression corpus', () => {
   it.each(corpus)('$id', ({ lines, expected }) => {
     const text = lines.map(({ text }) => text).join('\n');
     expect(manualDraftFromRecognizedText(text, lines)).toMatchObject(expected);
+  });
+
+  it('does not promote a generic product type to brand', () => {
+    expect(
+      manualDraftFromRecognizedText('Sérum\nAcide glycolique'),
+    ).toMatchObject({
+      brand: '',
+      name: 'Sérum Acide glycolique',
+    });
+  });
+
+  it('recovers CeraVe from a manufacturer URL on the back label', () => {
+    expect(
+      manualDraftFromRecognizedText(
+        'Crème hydratante visage SPF 30\nMade in France www.cerave.com',
+      ),
+    ).toMatchObject({ brand: 'CeraVe' });
   });
 });
