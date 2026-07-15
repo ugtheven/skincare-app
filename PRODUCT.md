@@ -44,8 +44,11 @@ V1 uses a single light appearance, sufficient contrast, iOS-sized touch targets,
 ## V1 Scope
 
 - Product addition through barcode, product photo, OCR, text search, or manual entry.
-- Clear product composition explanations without arbitrary universal scores.
-- Morning, evening, weekly, or selected-day routines with one-tap completion and undo.
+- A shared product catalogue, local cache, and personal collection treated as distinct concepts.
+- An essential product page covering purpose, available key ingredients, verified precautions, provenance, and confidence without arbitrary universal scores.
+- One active morning routine and one active evening routine.
+- Ordered product or category-placeholder steps scheduled every day, on selected weekdays, or temporarily disabled.
+- One-tap completion, undo, or deliberate skip while preserving past routine snapshots.
 - A Today screen showing the current routine, progress, relevant sun protection, and next useful action.
 - UV index and recommended sunscreen reapplication tracking without claiming exact protection duration.
 - Weekly skin check-ins with optional photos, simple ratings, and notes.
@@ -64,4 +67,4 @@ The primary sections are Today, Products, and Progress. Settings, profile, and a
 
 ## Relationship To Repository Docs
 
-The fuller product scope and roadmap remain documented in `docs/PRODUCT.md`. This root file exists so Impeccable and other design-aware tools can load the confirmed product context directly.
+The broader product intent remains documented in `docs/PRODUCT.md`. The detailed scope, order, and acceptance criteria for routines and catalogue work live in `docs/ROUTINES_CATALOG_ROADMAP.md` and take precedence over this summary on that perimeter. This root file exists so Impeccable and other design-aware tools can load the confirmed product context directly.

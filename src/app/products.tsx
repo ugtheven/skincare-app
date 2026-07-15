@@ -13,10 +13,18 @@ import {
   type NativeStackScreenProps,
 } from '@react-navigation/native-stack';
 import { useIsFocused } from '@react-navigation/native';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
 import {
   ActivityIndicator,
   AccessibilityInfo,
+  Alert,
   Animated,
   FlatList,
   Linking,
@@ -44,6 +52,12 @@ import {
   recognizePackagingText,
   type RecognizedPackagingText,
 } from '@/data/on-device-text-recognition';
+import {
+  cacheScanResult,
+  markScanResultAsOwned,
+  openCachedScanResult,
+  openProductCandidateResult,
+} from '@/data/product-scan-result';
 import { productRepository } from '@/data/sqlite-product-repository';
 import { routineRepository } from '@/data/sqlite-routine-repository';
 import {
@@ -51,6 +65,7 @@ import {
   mergeBarcodeEnrichment,
   recognizeProductBarcode,
   recognizeProductPhoto,
+  searchProductsByText,
 } from '@/data/product-recognition-service';
 import { recognizeProductWithVisualFallback } from '@/data/product-visual-fallback';
 import {
@@ -84,6 +99,19 @@ import {
   type ProductDraft,
 } from '@/domain/product';
 import {
+  allWeekdays,
+  routineCategoryForProduct,
+  routineNameForPeriod,
+  type RoutineDefinition,
+  type RoutinePeriod,
+  type Weekday,
+} from '@/domain/routine';
+import {
+  productsScannerOrigin,
+  scannerCloseLabel,
+  type ProductScannerOrigin,
+} from '@/domain/product-scanner-origin';
+import {
   candidateToDraft,
   hasDecisiveCandidate,
   hasReliableCandidate,
@@ -103,18 +131,34 @@ import {
   type ScannerRect,
   type ScannerSize,
 } from '@/domain/scanner-highlights';
-import type { RoutineOccurrence } from '@/domain/routine';
-
 type Screen =
   | 'catalogue'
+  | 'search'
   | 'scanner'
   | 'cloudConsent'
   | 'recognizing'
   | 'recognitionIssue'
   | 'candidates'
   | 'form'
-  | 'detail'
-  | 'success';
+  | 'detail';
+
+export type ProductResultContext = 'collection' | 'manual' | 'scan' | 'search';
+
+export type ProductDetailContextualAction = {
+  label: string;
+  accessibilityLabel: string;
+  isBusy?: boolean;
+  onPress: () => void;
+  emphasis?: 'primary' | 'secondary';
+};
+
+type ProductWorkflowContextValue = {
+  onClose: () => void;
+  onProductSelected: (product: Product) => void;
+};
+
+const ProductWorkflowContext =
+  createContext<ProductWorkflowContextValue | null>(null);
 
 type PhotoRecognitionFallback = Extract<
   Awaited<ReturnType<typeof recognizeProductPhoto>>,
@@ -134,6 +178,9 @@ type ScannerHighlight = {
   tone: 'detected' | 'confirmed';
 };
 
+type TextSearchStatus =
+  'idle' | 'invalid' | 'loading' | 'results' | 'not_found' | 'unavailable';
+
 // Keep confirmed geometry on screen long enough to be perceived before lookup.
 const SCAN_SUCCESS_HOLD_MS = 650;
 const LIVE_SCANNER_EVALUATION_MS = 400;
@@ -142,14 +189,83 @@ const CAMERA_HANDOFF_SETTLE_MS = 300;
 const CAMERA_CAPTURE_RETRY_MS = 220;
 const CAMERA_CAPTURE_ATTEMPTS = 3;
 const CAMERA_READY_TIMEOUT_MS = 2500;
+const ROUTINE_WEEKDAYS: { label: string; short: string; value: Weekday }[] = [
+  { label: 'Lundi', short: 'L', value: 1 },
+  { label: 'Mardi', short: 'M', value: 2 },
+  { label: 'Mercredi', short: 'M', value: 3 },
+  { label: 'Jeudi', short: 'J', value: 4 },
+  { label: 'Vendredi', short: 'V', value: 5 },
+  { label: 'Samedi', short: 'S', value: 6 },
+  { label: 'Dimanche', short: 'D', value: 0 },
+];
+
+function draftFromProduct(product: Product): ProductDraft {
+  return {
+    name: product.name,
+    brand: product.brand ?? '',
+    category: product.category ?? '',
+    barcode: product.barcode ?? '',
+    imageUrl: product.imageUrl ?? '',
+    imageSource: product.imageSource ?? '',
+    imageSourceUrl: product.imageSourceUrl ?? '',
+    imageLicense: product.imageLicense ?? '',
+    imageLicenseUrl: product.imageLicenseUrl ?? '',
+    ingredientsText: product.ingredientsText ?? '',
+    ingredientsSource: product.ingredientsSource ?? '',
+    ingredientsSourceUrl: product.ingredientsSourceUrl ?? '',
+    usageText: product.usageText ?? '',
+    usageSource: product.usageSource ?? '',
+    usageSourceUrl: product.usageSourceUrl ?? '',
+    precautionsText: product.precautionsText ?? '',
+    precautionsSource: product.precautionsSource ?? '',
+    precautionsSourceUrl: product.precautionsSourceUrl ?? '',
+    informationConfidence: product.informationConfidence ?? '',
+    confidenceSource: product.confidenceSource ?? '',
+    confidenceSourceUrl: product.confidenceSourceUrl ?? '',
+    confidenceNote: product.confidenceNote ?? '',
+    source: product.source,
+  };
+}
+
+function candidateFromProduct(product: Product): ProductCandidate {
+  return {
+    id: product.id,
+    name: product.name,
+    brand: product.brand,
+    category: product.category,
+    imageUrl: product.imageUrl,
+    imageSource: product.imageSource,
+    imageSourceUrl: product.imageSourceUrl,
+    imageLicense: product.imageLicense,
+    imageLicenseUrl: product.imageLicenseUrl,
+    ingredientsText: product.ingredientsText,
+    ingredientsSource: product.ingredientsSource,
+    ingredientsSourceUrl: product.ingredientsSourceUrl,
+    usageText: product.usageText,
+    usageSource: product.usageSource,
+    usageSourceUrl: product.usageSourceUrl,
+    precautionsText: product.precautionsText,
+    precautionsSource: product.precautionsSource,
+    precautionsSourceUrl: product.precautionsSourceUrl,
+    informationConfidence: product.informationConfidence,
+    confidenceSource: product.confidenceSource,
+    confidenceSourceUrl: product.confidenceSourceUrl,
+    confidenceNote: product.confidenceNote,
+    score: 0,
+    source: 'local',
+  };
+}
 
 type ProductsStackParamList = {
   Catalogue: undefined;
   Workflow: {
     initialScreen: Exclude<Screen, 'catalogue'>;
+    origin: ProductScannerOrigin;
     draft?: ProductDraft;
     notice?: string | null;
     product?: Product;
+    isOwned?: boolean;
+    resultContext?: ProductResultContext;
     nonce: number;
   };
 };
@@ -173,10 +289,43 @@ export default function ProductsScreen() {
   );
 }
 
+export function RoutineProductScanner({
+  origin,
+  onClose,
+  onProductSelected,
+}: {
+  origin: Extract<ProductScannerOrigin, { kind: 'routine-editor' }>;
+  onClose: () => void;
+  onProductSelected: (product: Product) => void;
+}) {
+  return (
+    <ProductWorkflowContext.Provider value={{ onClose, onProductSelected }}>
+      <ProductsStack.Navigator
+        initialRouteName="Workflow"
+        screenOptions={{ headerShown: false }}
+      >
+        <ProductsStack.Screen name="Catalogue" component={ProductsExperience} />
+        <ProductsStack.Screen
+          name="Workflow"
+          component={ProductsExperience}
+          initialParams={{
+            initialScreen: 'scanner',
+            origin,
+            nonce: Date.now(),
+          }}
+          options={{ gestureEnabled: true }}
+        />
+      </ProductsStack.Navigator>
+    </ProductWorkflowContext.Provider>
+  );
+}
+
 function ProductsExperience({ route, navigation }: ProductsExperienceProps) {
   const colors = Colors;
   const insets = useSafeAreaInsets();
   const workflowParams = route.name === 'Workflow' ? route.params : null;
+  const origin = workflowParams?.origin ?? productsScannerOrigin;
+  const externalWorkflow = useContext(ProductWorkflowContext);
   const [screen, setScreen] = useState<Screen>(
     workflowParams?.initialScreen ?? 'catalogue',
   );
@@ -187,7 +336,17 @@ function ProductsExperience({ route, navigation }: ProductsExperienceProps) {
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(
     workflowParams?.product ?? null,
   );
+  const [selectedProductOwned, setSelectedProductOwned] = useState(
+    workflowParams?.isOwned ?? false,
+  );
+  const [resultContext, setResultContext] = useState<ProductResultContext>(
+    workflowParams?.resultContext ??
+      (workflowParams?.product ? 'collection' : 'scan'),
+  );
   const [candidates, setCandidates] = useState<ProductCandidate[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchStatus, setSearchStatus] = useState<TextSearchStatus>('idle');
+  const [searchIsPartial, setSearchIsPartial] = useState(false);
   const [recognizedText, setRecognizedText] = useState('');
   const [pendingIdentifier, setPendingIdentifier] = useState<string | null>(
     null,
@@ -201,7 +360,6 @@ function ProductsExperience({ route, navigation }: ProductsExperienceProps) {
   const [reportingCandidateId, setReportingCandidateId] = useState<
     string | null
   >(null);
-  const [routine, setRoutine] = useState<RoutineOccurrence | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isLookingUp, setIsLookingUp] = useState(false);
   const [isEnriching, setIsEnriching] = useState(false);
@@ -210,6 +368,7 @@ function ProductsExperience({ route, navigation }: ProductsExperienceProps) {
     workflowParams?.notice ?? null,
   );
   const [formError, setFormError] = useState<string | null>(null);
+  const [isRoutineSheetOpen, setIsRoutineSheetOpen] = useState(false);
   const [pendingFallback, setPendingFallback] =
     useState<PhotoRecognitionFallback | null>(null);
   const [pendingObservations, setPendingObservations] = useState<
@@ -245,7 +404,6 @@ function ProductsExperience({ route, navigation }: ProductsExperienceProps) {
       candidates: 'Résultats de reconnaissance disponibles',
       detail: 'Fiche produit ouverte',
       recognitionIssue: 'La reconnaissance a rencontré un problème',
-      success: 'Produit enregistré',
     };
     const announcement = announcements[screen];
     if (announcement) {
@@ -256,7 +414,7 @@ function ProductsExperience({ route, navigation }: ProductsExperienceProps) {
   const loadProducts = useCallback(async () => {
     setIsLoading(true);
     try {
-      setProducts(await productRepository.listProducts());
+      setProducts(await productRepository.listOwnedProducts());
       setMessage(null);
     } catch {
       setMessage('Les produits ne peuvent pas être chargés pour le moment.');
@@ -273,7 +431,7 @@ function ProductsExperience({ route, navigation }: ProductsExperienceProps) {
 
   useFocusEffect(
     useCallback(() => {
-      const tabsNavigation = navigation.getParent()?.getParent();
+      const tabsNavigation = navigation.getParent();
       tabsNavigation?.setOptions({
         tabBarStyle: screen === 'catalogue' ? undefined : { display: 'none' },
       });
@@ -287,12 +445,16 @@ function ProductsExperience({ route, navigation }: ProductsExperienceProps) {
     visualLookupAbortRef.current = null;
     setIsLookingUp(false);
     setIsEnriching(false);
+    if (externalWorkflow) {
+      externalWorkflow.onClose();
+      return;
+    }
     if (route.name === 'Workflow' && navigation.canGoBack()) {
       navigation.goBack();
       return;
     }
     setScreen('catalogue');
-  }, [navigation, route.name]);
+  }, [externalWorkflow, navigation, route.name]);
 
   useEffect(() => {
     if (screen !== 'catalogue' || !capturedImageUri) return;
@@ -310,6 +472,7 @@ function ProductsExperience({ route, navigation }: ProductsExperienceProps) {
     if (route.name === 'Catalogue') {
       navigation.navigate('Workflow', {
         initialScreen: 'form',
+        origin: productsScannerOrigin,
         draft: prefilledDraft,
         notice,
         nonce: Date.now(),
@@ -324,6 +487,90 @@ function ProductsExperience({ route, navigation }: ProductsExperienceProps) {
     setFormError(null);
     setMessage(notice);
     setScreen('form');
+  };
+
+  const openTextSearch = () => {
+    if (route.name === 'Catalogue') {
+      navigation.navigate('Workflow', {
+        initialScreen: 'search',
+        origin: productsScannerOrigin,
+        nonce: Date.now(),
+      });
+      return;
+    }
+    setMessage(null);
+    setScreen('search');
+  };
+
+  const openTextSearchCandidate = async (candidate: ProductCandidate) => {
+    setIsSaving(true);
+    try {
+      const result = await openProductCandidateResult(
+        candidate,
+        productRepository,
+      );
+      setSelectedProduct(result.product);
+      setSelectedProductOwned(result.isOwned);
+      setResultContext('search');
+      setMessage(
+        result.isOwned ? 'Ce produit est déjà dans Mes produits.' : null,
+      );
+      setScreen('detail');
+    } catch {
+      setSearchStatus('unavailable');
+      setMessage('La fiche de ce produit ne peut pas être ouverte. Réessaie.');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const runTextSearch = async () => {
+    const query = searchQuery.trim();
+    if (query.length < 2) {
+      setCandidates([]);
+      setSearchStatus('invalid');
+      setMessage(null);
+      return;
+    }
+
+    const sessionId = recognitionSessionRef.current + 1;
+    recognitionSessionRef.current = sessionId;
+    setCandidates([]);
+    setSearchStatus('loading');
+    setSearchIsPartial(false);
+    setMessage(null);
+
+    const outcome = await searchProductsByText(query, {
+      searchLocal: async (value) =>
+        (await productRepository.searchByText(value)).map(candidateFromProduct),
+      searchShared: lookupSharedProductsByText,
+      searchPublic: lookupOpenBeautyFactsByText,
+    });
+    if (sessionId !== recognitionSessionRef.current) return;
+
+    if (outcome.kind === 'results') {
+      setCandidates(outcome.candidates);
+      setSearchIsPartial(outcome.isPartial);
+      setSearchStatus('results');
+      if (hasDecisiveCandidate(outcome.candidates)) {
+        await openTextSearchCandidate(outcome.candidates[0]);
+      } else {
+        void AccessibilityInfo.announceForAccessibility(
+          `${outcome.candidates.length} résultat${outcome.candidates.length > 1 ? 's' : ''} à confirmer`,
+        );
+      }
+      return;
+    }
+
+    setSearchStatus(outcome.kind);
+    setSearchIsPartial(
+      outcome.kind === 'not_found' ? outcome.isPartial : false,
+    );
+    void AccessibilityInfo.announceForAccessibility(
+      outcome.kind === 'unavailable'
+        ? 'Recherche en ligne indisponible'
+        : 'Aucun produit trouvé',
+    );
   };
 
   const withPendingIdentifier = (productDraft: ProductDraft): ProductDraft =>
@@ -345,17 +592,18 @@ function ProductsExperience({ route, navigation }: ProductsExperienceProps) {
     }
   };
 
-  const openScanner = () => {
+  const openScanner = async () => {
     if (route.name === 'Catalogue') {
       navigation.navigate('Workflow', {
         initialScreen: 'scanner',
+        origin: productsScannerOrigin,
         nonce: Date.now(),
       });
       return;
     }
     recognitionSessionRef.current += 1;
     setIsEnriching(false);
-    setCapturedImageUri(null);
+    await discardCapturedImage();
     setRecognizedText('');
     setPendingIdentifier(null);
     setScannerInitialMode('barcode');
@@ -394,22 +642,7 @@ function ProductsExperience({ route, navigation }: ProductsExperienceProps) {
         : recognizePackagingText,
       searchLocal: async (lookupText) => {
         const localProducts = await productRepository.searchByText(lookupText);
-        return localProducts.map((product) => ({
-          id: product.id,
-          name: product.name,
-          brand: product.brand,
-          category: product.category,
-          imageUrl: product.imageUrl,
-          imageSource: product.imageSource,
-          imageSourceUrl: product.imageSourceUrl,
-          imageLicense: product.imageLicense,
-          imageLicenseUrl: product.imageLicenseUrl,
-          ingredientsText: product.ingredientsText,
-          ingredientsSource: product.ingredientsSource,
-          ingredientsSourceUrl: product.ingredientsSourceUrl,
-          score: 0,
-          source: 'local' as const,
-        }));
+        return localProducts.map(candidateFromProduct);
       },
       searchShared: lookupSharedProductsByText,
       searchPublic: lookupOpenBeautyFactsByText,
@@ -619,42 +852,49 @@ function ProductsExperience({ route, navigation }: ProductsExperienceProps) {
     closeFlow();
   };
 
+  const showScanResult = async (
+    result: Awaited<ReturnType<typeof cacheScanResult>>,
+  ) => {
+    await discardCapturedImage();
+    setSelectedProduct(result.product);
+    setSelectedProductOwned(result.isOwned);
+    setResultContext('scan');
+    setMessage(
+      result.isOwned ? 'Ce produit est déjà dans Mes produits.' : null,
+    );
+    setScreen('detail');
+  };
+
   const confirmCandidate = async (candidate: ProductCandidate) => {
     if (!hasProductCandidateImage(candidate)) {
       setRecognitionIssue({
         title: 'Photo du produit manquante',
         message:
-          'Cette fiche doit être complétée avant de pouvoir être ajoutée.',
+          'Cette fiche doit être complétée avant de pouvoir être consultée.',
       });
       setScreen('recognitionIssue');
       return;
     }
     recognitionSessionRef.current += 1;
-    if (candidate.source === 'local') {
-      const product = products.find((item) => item.id === candidate.id);
-      if (product) {
-        if (pendingIdentifier) {
-          await productRepository.addIdentifier(product.id, pendingIdentifier);
-        }
-        await discardCapturedImage();
-        setSelectedProduct(product);
-        setRoutine(await routineRepository.getCurrentOccurrence(new Date()));
-        setMessage('Ce produit est déjà dans ton catalogue.');
-        setScreen('success');
-        return;
-      }
-    }
-
-    const candidateDraft = withPendingIdentifier(candidateToDraft(candidate));
-    if (!candidateDraft.name.trim() || !candidateDraft.category.trim()) {
-      await discardCapturedImage();
-      openManualForm(candidateDraft);
-      return;
-    }
-
     setIsSaving(true);
     try {
-      const result = await productRepository.saveProduct(candidateDraft);
+      let result;
+      if (!pendingIdentifier) {
+        result = await openProductCandidateResult(candidate, productRepository);
+      } else if (candidate.source === 'local') {
+        const product = await productRepository.findById(candidate.id);
+        if (!product) throw new Error('Cached product missing');
+        result = await openCachedScanResult(
+          product,
+          pendingIdentifier,
+          productRepository,
+        );
+      } else {
+        const candidateDraft = withPendingIdentifier(
+          candidateToDraft(candidate),
+        );
+        result = await cacheScanResult(candidateDraft, productRepository);
+      }
       if (candidate.source === 'google-web') {
         void submitConfirmedWebProduct(
           candidate,
@@ -662,21 +902,12 @@ function ProductsExperience({ route, navigation }: ProductsExperienceProps) {
           pendingIdentifier ?? undefined,
         ).catch(() => undefined);
       }
-      await discardCapturedImage();
-      setSelectedProduct(result.product);
-      setRoutine(await routineRepository.getCurrentOccurrence(new Date()));
-      setMessage(
-        result.created
-          ? 'Le produit est enregistré.'
-          : 'Ce produit était déjà dans ton catalogue.',
-      );
-      setScreen('success');
-      void AccessibilityInfo.announceForAccessibility('Produit enregistré');
+      await showScanResult(result);
     } catch {
       setRecognitionIssue({
-        title: 'Enregistrement impossible',
+        title: 'Fiche indisponible',
         message:
-          'Le produit a été reconnu, mais il n’a pas pu être enregistré.',
+          'Le produit a été reconnu, mais sa fiche n’a pas pu être ouverte.',
       });
       setScreen('recognitionIssue');
     } finally {
@@ -707,6 +938,7 @@ function ProductsExperience({ route, navigation }: ProductsExperienceProps) {
   const refreshBarcodeEnrichment = async (
     identifier: string,
     sessionId: number,
+    productId: string,
   ) => {
     const delays = [1_200, 2_500, 4_500, 8_000];
     setIsEnriching(true);
@@ -723,7 +955,17 @@ function ProductsExperience({ route, navigation }: ProductsExperienceProps) {
         if (sessionId !== recognitionSessionRef.current) return;
         if (!refreshed) continue;
 
-        setDraft((current) => mergeBarcodeEnrichment(current, refreshed));
+        const currentProduct = await productRepository.findById(productId);
+        if (!currentProduct || sessionId !== recognitionSessionRef.current) {
+          return;
+        }
+        const enrichedDraft = mergeBarcodeEnrichment(
+          draftFromProduct(currentProduct),
+          refreshed,
+        );
+        const { product } = await productRepository.saveProduct(enrichedDraft);
+        if (sessionId !== recognitionSessionRef.current) return;
+        setSelectedProduct(product);
         if (!barcodeDraftNeedsEnrichment(refreshed)) {
           setMessage('Photo et ingrédients ajoutés à cette fiche.');
           void AccessibilityInfo.announceForAccessibility(
@@ -760,46 +1002,56 @@ function ProductsExperience({ route, navigation }: ProductsExperienceProps) {
     });
     if (sessionId !== recognitionSessionRef.current) return;
 
-    if (result.kind === 'local') {
-      const existing = result.product;
-      setSelectedProduct(existing);
-      setDraft({
-        name: existing.name,
-        brand: existing.brand ?? '',
-        category: existing.category ?? '',
-        barcode: existing.barcode ?? identifier,
-        imageUrl: existing.imageUrl ?? '',
-        imageSource: existing.imageSource ?? '',
-        imageSourceUrl: existing.imageSourceUrl ?? '',
-        imageLicense: existing.imageLicense ?? '',
-        imageLicenseUrl: existing.imageLicenseUrl ?? '',
-        ingredientsText: existing.ingredientsText ?? '',
-        ingredientsSource: existing.ingredientsSource ?? '',
-        ingredientsSourceUrl: existing.ingredientsSourceUrl ?? '',
-        source: existing.source,
-      });
-      setMessage('Ce produit est déjà dans ton catalogue.');
-      setPendingIdentifier(null);
-      setScannerInitialMode('barcode');
-      setRoutine(await routineRepository.getCurrentOccurrence(new Date()));
-      setScreen('success');
-    } else if (result.kind === 'draft') {
-      setDraft({ ...result.draft, barcode: identifier, source: 'barcode' });
-      setPendingIdentifier(null);
-      setScannerInitialMode('barcode');
-      setScreen('form');
-      setIsLookingUp(false);
-      if (
-        result.provider === 'shared' &&
-        barcodeDraftNeedsEnrichment(result.draft)
-      ) {
-        void refreshBarcodeEnrichment(identifier, sessionId);
+    try {
+      if (result.kind === 'local') {
+        const existing = result.product;
+        const cachedResult = await openCachedScanResult(
+          existing,
+          identifier,
+          productRepository,
+        );
+        if (sessionId !== recognitionSessionRef.current) return;
+        setPendingIdentifier(null);
+        setScannerInitialMode('barcode');
+        await showScanResult(cachedResult);
+      } else if (result.kind === 'draft') {
+        const scannedDraft = {
+          ...result.draft,
+          barcode: identifier,
+          source: 'barcode' as const,
+        };
+        const cachedResult = await cacheScanResult(
+          scannedDraft,
+          productRepository,
+        );
+        if (sessionId !== recognitionSessionRef.current) return;
+        setPendingIdentifier(null);
+        setScannerInitialMode('barcode');
+        await showScanResult(cachedResult);
+        if (
+          result.provider === 'shared' &&
+          barcodeDraftNeedsEnrichment(result.draft)
+        ) {
+          void refreshBarcodeEnrichment(
+            identifier,
+            sessionId,
+            cachedResult.product.id,
+          );
+        }
+      } else {
+        setScannerInitialMode('front');
+        setScreen('scanner');
       }
-    } else {
-      setScannerInitialMode('front');
-      setScreen('scanner');
+    } catch {
+      setRecognitionIssue({
+        title: 'Fiche indisponible',
+        message:
+          'Le produit a été reconnu, mais sa fiche n’a pas pu être ouverte.',
+      });
+      setScreen('recognitionIssue');
+    } finally {
+      setIsLookingUp(false);
     }
-    if (result.kind !== 'draft') setIsLookingUp(false);
   };
 
   const saveProduct = async () => {
@@ -818,15 +1070,25 @@ function ProductsExperience({ route, navigation }: ProductsExperienceProps) {
     setFormError(null);
     try {
       const result = await productRepository.saveProduct(draft);
+      const shouldOwnImmediately = origin.kind !== 'routine-editor';
+      if (shouldOwnImmediately) {
+        await productRepository.markAsOwned(result.product.id);
+      }
       await discardCapturedImage();
       setSelectedProduct(result.product);
-      setMessage(
-        result.created
-          ? 'Produit ajouté à ton catalogue.'
-          : 'Ce produit était déjà dans ton catalogue.',
+      setSelectedProductOwned(
+        shouldOwnImmediately ||
+          (await productRepository.isOwned(result.product.id)),
       );
-      setRoutine(await routineRepository.getCurrentOccurrence(new Date()));
-      setScreen('success');
+      setResultContext('manual');
+      setMessage(
+        origin.kind === 'routine-editor'
+          ? 'Produit enregistré. Ajoute-le maintenant à la routine.'
+          : result.created
+            ? 'Produit ajouté à Mes produits.'
+            : 'Ce produit est déjà dans Mes produits.',
+      );
+      setScreen('detail');
       void AccessibilityInfo.announceForAccessibility('Produit enregistré');
     } catch {
       setFormError('Impossible d’enregistrer ce produit. Réessaie.');
@@ -835,28 +1097,123 @@ function ProductsExperience({ route, navigation }: ProductsExperienceProps) {
     }
   };
 
-  const addToRoutine = async () => {
-    if (!routine || !selectedProduct) return;
+  const markSelectedProductOwned = async () => {
+    if (!selectedProduct || selectedProductOwned || isSaving) return;
 
     setIsSaving(true);
     try {
-      await routineRepository.addProductStep({
-        routineId: routine.routine.id,
-        productId: selectedProduct.id,
-        title: selectedProduct.name,
-      });
-      const successMessage = `${selectedProduct.name} a été ajouté à ${routine.routine.name}.`;
-      await loadProducts();
-      setMessage(successMessage);
-      setRoutine(null);
-    } catch {
-      setMessage(
-        'Le produit est enregistré, mais pas encore ajouté à la routine.',
+      const added = await markScanResultAsOwned(
+        selectedProduct.id,
+        productRepository,
       );
+      setSelectedProductOwned(true);
+      await loadProducts();
+      setMessage(
+        added
+          ? 'Produit ajouté à Mes produits.'
+          : 'Ce produit est déjà dans Mes produits.',
+      );
+      void AccessibilityInfo.announceForAccessibility(
+        'Produit ajouté à Mes produits',
+      );
+    } catch {
+      setMessage('Impossible d’ajouter ce produit. Réessaie.');
     } finally {
       setIsSaving(false);
     }
   };
+
+  const addSelectedProductToRoutine = async (input: {
+    period: RoutinePeriod;
+    selectedWeekdays: Weekday[];
+  }) => {
+    if (!selectedProduct || isSaving) return;
+    setIsSaving(true);
+    try {
+      await routineRepository.addProductStep({
+        period: input.period,
+        productId: selectedProduct.id,
+        title: selectedProduct.name,
+        category: routineCategoryForProduct(selectedProduct.category),
+        selectedWeekdays: input.selectedWeekdays,
+      });
+      setSelectedProductOwned(true);
+      setIsRoutineSheetOpen(false);
+      await loadProducts();
+      setMessage(`Produit ajouté à ${routineNameForPeriod(input.period)}.`);
+      void AccessibilityInfo.announceForAccessibility(
+        `Produit ajouté à ${routineNameForPeriod(input.period)}`,
+      );
+    } catch {
+      setMessage('Impossible d’ajouter ce produit à la routine. Réessaie.');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const removeSelectedProduct = () => {
+    if (!selectedProduct || isSaving) return;
+    Alert.alert(
+      'Retirer de Mes produits ?',
+      'Ses usages futurs deviendront des étapes de catégorie. Ton historique restera inchangé.',
+      [
+        { text: 'Annuler', style: 'cancel' },
+        {
+          text: 'Retirer',
+          style: 'destructive',
+          onPress: async () => {
+            setIsSaving(true);
+            try {
+              await productRepository.removeFromCollection(selectedProduct.id);
+              setSelectedProductOwned(false);
+              await loadProducts();
+              setMessage(
+                'Produit retiré. Les routines futures utilisent maintenant des placeholders.',
+              );
+              void AccessibilityInfo.announceForAccessibility(
+                'Produit retiré de Mes produits',
+              );
+            } catch {
+              setMessage('Impossible de retirer ce produit. Réessaie.');
+            } finally {
+              setIsSaving(false);
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  if (screen === 'search') {
+    return (
+      <ProductTextSearch
+        candidates={candidates}
+        isPartial={searchIsPartial}
+        isSaving={isSaving}
+        message={message}
+        query={searchQuery}
+        status={searchStatus}
+        onCancel={closeFlow}
+        onChangeQuery={(value) => {
+          setSearchQuery(value);
+          if (searchStatus !== 'loading') {
+            setSearchStatus('idle');
+            setCandidates([]);
+            setMessage(null);
+          }
+        }}
+        onManual={() =>
+          openManualForm({
+            ...emptyProductDraft,
+            name: searchQuery.trim(),
+          })
+        }
+        onScan={() => void openScanner()}
+        onSearch={() => void runTextSearch()}
+        onSelect={(candidate) => void openTextSearchCandidate(candidate)}
+      />
+    );
+  }
 
   if (screen === 'scanner') {
     return (
@@ -942,7 +1299,7 @@ function ProductsExperience({ route, navigation }: ProductsExperienceProps) {
           if (pendingFallback && capturedImageUri) {
             void runVisualEnrichment(pendingFallback, capturedImageUri);
           } else {
-            openScanner();
+            void openScanner();
           }
         }}
       />
@@ -992,22 +1349,49 @@ function ProductsExperience({ route, navigation }: ProductsExperienceProps) {
   }
 
   if (screen === 'detail' && selectedProduct) {
-    return <ProductDetail product={selectedProduct} onBack={closeFlow} />;
-  }
-
-  if (screen === 'success') {
+    const routineEditorAction =
+      origin.kind === 'routine-editor' && externalWorkflow
+        ? {
+            label: `Ajouter à ${routineNameForPeriod(origin.routinePeriod)}`,
+            accessibilityLabel: `Ajouter ${selectedProduct.name} à ${routineNameForPeriod(origin.routinePeriod)}`,
+            isBusy: isSaving,
+            emphasis: 'primary' as const,
+            onPress: () => externalWorkflow.onProductSelected(selectedProduct),
+          }
+        : null;
     return (
-      <ProductSuccess
-        product={selectedProduct}
-        routine={routine}
-        isSaving={isSaving}
-        message={message}
-        onAdd={() => void addToRoutine()}
-        onDone={async () => {
-          await loadProducts();
-          closeFlow();
-        }}
-      />
+      <>
+        <ProductDetail
+          product={selectedProduct}
+          isOwned={selectedProductOwned}
+          isEnriching={isEnriching}
+          isSaving={isSaving}
+          message={message}
+          resultContext={resultContext}
+          closeLabel={scannerCloseLabel(origin)}
+          contextualAction={
+            routineEditorAction ?? {
+              label: 'Ajouter à une routine',
+              accessibilityLabel: `Ajouter ${selectedProduct.name} à une routine`,
+              isBusy: isSaving,
+              emphasis: 'primary',
+              onPress: () => setIsRoutineSheetOpen(true),
+            }
+          }
+          onMarkAsOwned={() => void markSelectedProductOwned()}
+          onRemoveFromCollection={removeSelectedProduct}
+          onBack={resultContext === 'search' ? openTextSearch : closeFlow}
+        />
+        {!routineEditorAction ? (
+          <RoutineAssignmentSheet
+            isBusy={isSaving}
+            product={selectedProduct}
+            visible={isRoutineSheetOpen}
+            onAdd={(input) => void addSelectedProductToRoutine(input)}
+            onClose={() => setIsRoutineSheetOpen(false)}
+          />
+        ) : null}
+      </>
     );
   }
 
@@ -1052,11 +1436,11 @@ function ProductsExperience({ route, navigation }: ProductsExperienceProps) {
                 <AppSymbol name="shippingbox" color={colors.tint} size={31} />
               </View>
               <Text style={[styles.emptyTitle, { color: colors.text }]}>
-                Ton catalogue commence ici.
+                Ajoute ton premier produit.
               </Text>
               <Text style={[styles.emptyBody, { color: colors.textSecondary }]}>
-                Scanne un produit ou ajoute-le à la main. Tu pourras ensuite le
-                placer dans ta routine.
+                Recherche par nom ou marque, scanne un produit ou ajoute-le à la
+                main.
               </Text>
             </View>
           )
@@ -1067,7 +1451,10 @@ function ProductsExperience({ route, navigation }: ProductsExperienceProps) {
             onPress={() => {
               navigation.navigate('Workflow', {
                 initialScreen: 'detail',
+                origin: productsScannerOrigin,
                 product,
+                isOwned: true,
+                resultContext: 'collection',
                 nonce: Date.now(),
               });
             }}
@@ -1087,19 +1474,29 @@ function ProductsExperience({ route, navigation }: ProductsExperienceProps) {
       >
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Scanner un produit"
-          onPress={openScanner}
+          accessibilityLabel="Rechercher un produit par nom ou marque"
+          onPress={openTextSearch}
           style={({ pressed }) => [
             styles.primaryButton,
             { backgroundColor: colors.tint, opacity: pressed ? 0.86 : 1 },
           ]}
         >
-          <AppSymbol
-            name="barcode.viewfinder"
-            color={colors.onTint}
-            size={21}
-          />
-          <Text style={styles.primaryButtonText}>Scanner un produit</Text>
+          <AppSymbol name="magnifyingglass" color={colors.onTint} size={20} />
+          <Text style={styles.primaryButtonText}>Rechercher un produit</Text>
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Scanner un produit"
+          onPress={() => void openScanner()}
+          style={({ pressed }) => [
+            styles.outlineButton,
+            { borderColor: colors.separator, opacity: pressed ? 0.65 : 1 },
+          ]}
+        >
+          <AppSymbol name="barcode.viewfinder" color={colors.tint} size={20} />
+          <Text style={[styles.outlineButtonText, { color: colors.tint }]}>
+            Scanner un produit
+          </Text>
         </Pressable>
         <Pressable
           accessibilityRole="button"
@@ -2133,6 +2530,325 @@ export function CloudConsentScreen({
   );
 }
 
+function textSearchSource(candidate: ProductCandidate) {
+  if (candidate.source === 'local') return 'Sur cet appareil';
+  if (candidate.source === 'shared') return 'Catalogue partagé';
+  if (candidate.source === 'open-beauty-facts') {
+    return 'Open Beauty Facts · données ODbL 1.0';
+  }
+  return 'Source fabricant vérifiée';
+}
+
+export function ProductTextSearch({
+  candidates,
+  isPartial,
+  isSaving,
+  message,
+  query,
+  status,
+  onCancel,
+  onChangeQuery,
+  onManual,
+  onScan,
+  onSearch,
+  onSelect,
+}: {
+  candidates: ProductCandidate[];
+  isPartial: boolean;
+  isSaving: boolean;
+  message: string | null;
+  query: string;
+  status: TextSearchStatus;
+  onCancel: () => void;
+  onChangeQuery: (value: string) => void;
+  onManual: () => void;
+  onScan: () => void;
+  onSearch: () => void;
+  onSelect: (candidate: ProductCandidate) => void;
+}) {
+  const colors = Colors;
+  const insets = useSafeAreaInsets();
+  const searched =
+    status === 'results' || status === 'not_found' || status === 'unavailable';
+
+  return (
+    <View style={[styles.screen, { backgroundColor: colors.background }]}>
+      <ScrollView
+        keyboardShouldPersistTaps="handled"
+        contentContainerStyle={[
+          styles.textSearchScreen,
+          {
+            paddingBottom: insets.bottom + 40,
+            paddingTop: insets.top + 12,
+          },
+        ]}
+      >
+        <View style={styles.textSearchNavRow}>
+          <Pressable
+            accessibilityRole="button"
+            onPress={onCancel}
+            style={styles.navAction}
+          >
+            <Text style={[styles.cancelText, { color: colors.tint }]}>
+              Annuler
+            </Text>
+          </Pressable>
+        </View>
+
+        <View style={styles.textSearchIntro}>
+          <Text style={[styles.candidateTitle, { color: colors.text }]}>
+            Trouver un produit
+          </Text>
+          <Text style={[styles.formIntro, { color: colors.textSecondary }]}>
+            Saisis son nom, sa marque ou les deux. Ajoute la variante exacte,
+            comme SPF 30 ou 10 %, si elle apparaît sur l’emballage.
+          </Text>
+        </View>
+
+        <View style={styles.textSearchField}>
+          <TextInput
+            accessibilityLabel="Nom ou marque du produit"
+            autoCapitalize="words"
+            autoCorrect={false}
+            clearButtonMode="while-editing"
+            editable={status !== 'loading'}
+            onChangeText={onChangeQuery}
+            onSubmitEditing={onSearch}
+            placeholder="Ex. CeraVe nettoyant moussant"
+            placeholderTextColor={colors.textSecondary}
+            returnKeyType="search"
+            style={[
+              styles.textSearchInput,
+              {
+                borderColor:
+                  status === 'invalid' ? colors.error : colors.separator,
+                color: colors.text,
+              },
+            ]}
+            value={query}
+          />
+          <Pressable
+            accessibilityRole="button"
+            accessibilityState={{
+              busy: status === 'loading',
+              disabled: status === 'loading',
+            }}
+            disabled={status === 'loading'}
+            onPress={onSearch}
+            style={({ pressed }) => [
+              styles.primaryButton,
+              {
+                backgroundColor: colors.tint,
+                opacity: pressed || status === 'loading' ? 0.65 : 1,
+              },
+            ]}
+          >
+            <AppSymbol name="magnifyingglass" color={colors.onTint} size={20} />
+            <Text style={styles.primaryButtonText}>
+              {status === 'loading' ? 'Recherche…' : 'Rechercher'}
+            </Text>
+          </Pressable>
+        </View>
+
+        {status === 'invalid' ? (
+          <Text accessibilityRole="alert" style={styles.errorText}>
+            Saisis au moins deux caractères.
+          </Text>
+        ) : null}
+
+        {status === 'loading' ? (
+          <View accessibilityLiveRegion="polite" style={styles.loadingBlock}>
+            <ActivityIndicator color={colors.tint} />
+            <Text style={[styles.loadingText, { color: colors.textSecondary }]}>
+              Recherche sur cet appareil, puis dans les catalogues autorisés…
+            </Text>
+          </View>
+        ) : null}
+
+        {message ? <Notice message={message} /> : null}
+
+        {status === 'results' ? (
+          <View style={styles.textSearchResults}>
+            <View style={styles.textSearchResultsHeader}>
+              <Text style={[styles.detailSectionTitle, { color: colors.text }]}>
+                Choisis le bon produit
+              </Text>
+              <Text
+                style={[
+                  styles.detailSupportingText,
+                  { color: colors.textSecondary },
+                ]}
+              >
+                {candidates.length} résultat{candidates.length > 1 ? 's' : ''}.
+                Aucun choix incertain n’est fait automatiquement.
+              </Text>
+            </View>
+            {isPartial ? (
+              <Notice message="Résultats partiels : une source en ligne est indisponible." />
+            ) : null}
+            <View>
+              {candidates.map((candidate) => (
+                <Pressable
+                  key={`${candidate.source}:${candidate.id}`}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Ouvrir ${[candidate.brand, candidate.name].filter(Boolean).join(' ')}`}
+                  accessibilityState={{ disabled: isSaving }}
+                  disabled={isSaving}
+                  onPress={() => onSelect(candidate)}
+                  style={({ pressed }) => [
+                    styles.textSearchResult,
+                    {
+                      borderColor: colors.separator,
+                      opacity: pressed || isSaving ? 0.65 : 1,
+                    },
+                  ]}
+                >
+                  {candidate.imageUrl ? (
+                    <Image
+                      source={candidate.imageUrl}
+                      style={styles.rowImage}
+                      contentFit="contain"
+                      accessible={false}
+                    />
+                  ) : (
+                    <View
+                      style={[
+                        styles.rowImage,
+                        { backgroundColor: colors.backgroundSelected },
+                      ]}
+                    >
+                      <AppSymbol
+                        name="drop"
+                        color={colors.textSecondary}
+                        size={22}
+                      />
+                    </View>
+                  )}
+                  <View style={styles.productCopy}>
+                    <Text style={[styles.productName, { color: colors.text }]}>
+                      {candidate.name}
+                    </Text>
+                    <Text
+                      style={[
+                        styles.productMeta,
+                        { color: colors.textSecondary },
+                      ]}
+                    >
+                      {[candidate.brand, candidate.category]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </Text>
+                    <Text
+                      style={[
+                        styles.candidateSource,
+                        { color: colors.textSecondary },
+                      ]}
+                    >
+                      {textSearchSource(candidate)}
+                      {candidate.imageLicense
+                        ? ` · image ${candidate.imageLicense}`
+                        : ''}
+                    </Text>
+                  </View>
+                  <AppSymbol
+                    name="chevron.right"
+                    color={colors.textSecondary}
+                    size={14}
+                  />
+                </Pressable>
+              ))}
+            </View>
+          </View>
+        ) : null}
+
+        {status === 'not_found' ? (
+          <View
+            accessibilityLiveRegion="polite"
+            style={styles.searchEmptyState}
+          >
+            <View
+              style={[
+                styles.emptyIcon,
+                { backgroundColor: colors.backgroundSelected },
+              ]}
+            >
+              <AppSymbol name="magnifyingglass" color={colors.tint} size={28} />
+            </View>
+            <Text style={[styles.emptyTitle, { color: colors.text }]}>
+              Aucun produit trouvé
+            </Text>
+            <Text style={[styles.emptyBody, { color: colors.textSecondary }]}>
+              Vérifie l’orthographe ou précise la marque et la variante.
+              {isPartial
+                ? ' Une source en ligne est temporairement indisponible.'
+                : ''}
+            </Text>
+          </View>
+        ) : null}
+
+        {status === 'unavailable' ? (
+          <View
+            accessibilityLiveRegion="polite"
+            style={styles.searchEmptyState}
+          >
+            <View
+              style={[
+                styles.emptyIcon,
+                { backgroundColor: colors.backgroundSelected },
+              ]}
+            >
+              <AppSymbol name="wifi.slash" color={colors.tint} size={28} />
+            </View>
+            <Text style={[styles.emptyTitle, { color: colors.text }]}>
+              Recherche en ligne indisponible
+            </Text>
+            <Text style={[styles.emptyBody, { color: colors.textSecondary }]}>
+              Réessaie plus tard, scanne l’emballage ou saisis le produit à la
+              main.
+            </Text>
+          </View>
+        ) : null}
+
+        {searched ? (
+          <View style={styles.searchFallbackActions}>
+            <Pressable
+              accessibilityRole="button"
+              onPress={onScan}
+              style={({ pressed }) => [
+                styles.outlineButton,
+                {
+                  borderColor: colors.separator,
+                  opacity: pressed ? 0.65 : 1,
+                },
+              ]}
+            >
+              <AppSymbol
+                name="barcode.viewfinder"
+                color={colors.tint}
+                size={20}
+              />
+              <Text style={[styles.outlineButtonText, { color: colors.tint }]}>
+                Scanner le produit
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={onManual}
+              style={styles.secondaryAction}
+            >
+              <Text
+                style={[styles.secondaryActionText, { color: colors.tint }]}
+              >
+                Saisir manuellement
+              </Text>
+            </Pressable>
+          </View>
+        ) : null}
+      </ScrollView>
+    </View>
+  );
+}
+
 function RecognitionProgress({
   imageUri,
   mode,
@@ -2407,8 +3123,8 @@ export function CandidateSelection({
         </Text>
         <Text style={[styles.formIntro, { color: colors.textSecondary }]}>
           {decisive
-            ? 'Vérifie une dernière fois avant de l’ajouter.'
-            : 'Choisis une suggestion pour l’ajouter.'}
+            ? 'Vérifie une dernière fois avant d’ouvrir la fiche.'
+            : 'Choisis une suggestion pour ouvrir sa fiche.'}
         </Text>
         {message ? <Notice message={message} /> : null}
         <View style={styles.candidateList}>
@@ -2482,7 +3198,11 @@ export function CandidateSelection({
                 ]}
               >
                 <Text style={styles.candidateConfirmText}>
-                  {isSaving ? 'Ajout…' : 'C’est ce produit'}
+                  {isSaving
+                    ? 'Ouverture…'
+                    : decisive
+                      ? 'Voir la fiche'
+                      : 'C’est ce produit'}
                 </Text>
               </Pressable>
               {candidate.source === 'shared' ? (
@@ -2917,116 +3637,455 @@ function CategoryField({
   );
 }
 
-export function ProductSuccess({
-  product,
-  routine,
-  isSaving,
-  message,
-  onAdd,
-  onDone,
+type EvidenceSource = {
+  label: string;
+  name: string;
+  url: string | null;
+};
+
+function safeSourceUrl(value: string | null) {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function displaySourceName(value: string) {
+  const knownSources: Record<string, string> = {
+    curated_packaging_corpus: 'Corpus packaging vérifié',
+    manufacturer_sitemap: 'Fabricant',
+    open_beauty_facts: 'Open Beauty Facts',
+    open_food_facts: 'Open Food Facts',
+  };
+  return knownSources[value] ?? value;
+}
+
+function evidenceSources(product: Product): EvidenceSource[] {
+  const sources = [
+    {
+      label: 'Usage',
+      name: product.usageText ? product.usageSource : null,
+      url: product.usageSourceUrl,
+    },
+    {
+      label: 'Précautions',
+      name: product.precautionsText ? product.precautionsSource : null,
+      url: product.precautionsSourceUrl,
+    },
+    {
+      label: 'Ingrédients',
+      name: product.ingredientsText ? product.ingredientsSource : null,
+      url: product.ingredientsSourceUrl,
+    },
+    {
+      label: 'Confiance',
+      name: product.informationConfidence ? product.confidenceSource : null,
+      url: product.confidenceSourceUrl,
+    },
+    {
+      label: 'Image',
+      name: product.imageSource,
+      url: product.imageSourceUrl,
+    },
+  ].filter(
+    (source): source is { label: string; name: string; url: string | null } =>
+      Boolean(source.name),
+  );
+
+  const seen = new Set<string>();
+  return sources.filter((source) => {
+    const key = `${source.label}:${source.name}:${source.url ?? ''}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function SourceReference({ source }: { source: EvidenceSource }) {
+  const colors = Colors;
+  const url = safeSourceUrl(source.url);
+  const copy = `${source.label} · ${displaySourceName(source.name)}`;
+  if (!url) {
+    return (
+      <View style={styles.sourceReference}>
+        <Text style={[styles.sourceLabel, { color: colors.textSecondary }]}>
+          {copy}
+        </Text>
+      </View>
+    );
+  }
+  return (
+    <Pressable
+      accessibilityRole="link"
+      accessibilityLabel={`Ouvrir la source ${source.label} : ${displaySourceName(source.name)}`}
+      accessibilityHint="Ouvre le site de la source"
+      onPress={() => void Linking.openURL(url)}
+      style={({ pressed }) => [
+        styles.sourceReference,
+        { opacity: pressed ? 0.65 : 1 },
+      ]}
+    >
+      <Text style={[styles.sourceLabel, { color: colors.tint }]}>{copy}</Text>
+      <AppSymbol name="arrow.up.right" color={colors.tint} size={13} />
+    </Pressable>
+  );
+}
+
+function InformationSection({
+  title,
+  children,
 }: {
-  product: Product | null;
-  routine: RoutineOccurrence | null;
-  isSaving: boolean;
-  message: string | null;
-  onAdd: () => void;
-  onDone: () => void;
+  title: string;
+  children: React.ReactNode;
 }) {
   const colors = Colors;
-  const insets = useSafeAreaInsets();
   return (
-    <View style={[styles.screen, { backgroundColor: colors.background }]}>
-      <ScrollView
-        contentContainerStyle={[
-          styles.association,
-          {
-            paddingBottom: insets.bottom + 32,
-            paddingTop: insets.top + 48,
-          },
-        ]}
+    <View style={[styles.detailSection, { borderColor: colors.separator }]}>
+      <Text
+        accessibilityRole="header"
+        style={[styles.detailSectionTitle, { color: colors.text }]}
       >
-        <View
-          style={[
-            styles.emptyIcon,
-            { backgroundColor: colors.backgroundSelected },
-          ]}
-        >
-          <AppSymbol name="checkmark" color={colors.tint} size={31} />
-        </View>
-        <Text style={[styles.associationTitle, { color: colors.text }]}>
-          Produit ajouté
-        </Text>
-        <Text style={[styles.emptyBody, { color: colors.textSecondary }]}>
-          {product?.name ?? 'Ce produit'} est enregistré dans ton catalogue.
-        </Text>
-        {message ? <Notice message={message} /> : null}
-        <Pressable
-          accessibilityRole="button"
-          onPress={onDone}
-          style={({ pressed }) => [
-            styles.primaryButton,
-            {
-              alignSelf: 'stretch',
-              backgroundColor: colors.tint,
-              opacity: pressed ? 0.8 : 1,
-            },
-          ]}
-        >
-          <Text style={styles.primaryButtonText}>Retour aux produits</Text>
-        </Pressable>
-        {routine ? (
-          <View
-            style={[
-              styles.routineChoice,
-              { backgroundColor: colors.backgroundSelected },
-            ]}
-          >
-            <Text
-              style={[
-                styles.routineChoiceLabel,
-                { color: colors.textSecondary },
-              ]}
-            >
-              Optionnel
-            </Text>
-            <Text style={[styles.routineChoiceTitle, { color: colors.text }]}>
-              Ajouter à {routine.routine.name}
-            </Text>
-          </View>
-        ) : null}
-        {routine ? (
-          <Pressable
-            accessibilityRole="button"
-            disabled={isSaving}
-            onPress={onAdd}
-            style={({ pressed }) => [
-              styles.primaryButton,
-              {
-                backgroundColor: colors.tint,
-                opacity: pressed || isSaving ? 0.65 : 1,
-              },
-            ]}
-          >
-            <Text style={styles.primaryButtonText}>
-              {isSaving ? 'Ajout…' : 'Ajouter à la routine'}
-            </Text>
-          </Pressable>
-        ) : null}
-      </ScrollView>
+        {title}
+      </Text>
+      {children}
     </View>
   );
 }
 
-function ProductDetail({
+function Disclosure({
+  expanded,
+  label,
+  onPress,
+  children,
+}: {
+  expanded: boolean;
+  label: string;
+  onPress: () => void;
+  children: React.ReactNode;
+}) {
+  const colors = Colors;
+  return (
+    <View>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ expanded }}
+        onPress={onPress}
+        style={({ pressed }) => [
+          styles.disclosureAction,
+          { opacity: pressed ? 0.65 : 1 },
+        ]}
+      >
+        <Text style={[styles.disclosureLabel, { color: colors.tint }]}>
+          {label}
+        </Text>
+        <AppSymbol
+          name={expanded ? 'chevron.up' : 'chevron.down'}
+          color={colors.tint}
+          size={14}
+        />
+      </Pressable>
+      {expanded ? children : null}
+    </View>
+  );
+}
+
+export function RoutineAssignmentSheet({
   product,
+  visible,
+  isBusy,
+  onAdd,
+  onClose,
+}: {
+  product: Product;
+  visible: boolean;
+  isBusy: boolean;
+  onAdd: (input: {
+    period: RoutinePeriod;
+    selectedWeekdays: Weekday[];
+  }) => void;
+  onClose: () => void;
+}) {
+  const colors = Colors;
+  const insets = useSafeAreaInsets();
+  const [period, setPeriod] = useState<RoutinePeriod>('morning');
+  const [selectedWeekdays, setSelectedWeekdays] =
+    useState<Weekday[]>(allWeekdays());
+  const [definitions, setDefinitions] = useState<
+    Record<RoutinePeriod, RoutineDefinition | null>
+  >({ morning: null, evening: null });
+  const [loadError, setLoadError] = useState(false);
+  const [isLoadingDefinitions, setIsLoadingDefinitions] = useState(false);
+  const category = routineCategoryForProduct(product.category);
+  const compatiblePlaceholder = definitions[period]?.steps.find(
+    (step) => !step.productId && step.category === category,
+  );
+  const effectiveWeekdays =
+    compatiblePlaceholder?.selectedWeekdays ?? selectedWeekdays;
+
+  useEffect(() => {
+    if (!visible) return;
+    setLoadError(false);
+    setIsLoadingDefinitions(true);
+    void Promise.all([
+      routineRepository.getRoutineForEditing('morning'),
+      routineRepository.getRoutineForEditing('evening'),
+    ])
+      .then(([morning, evening]) => setDefinitions({ morning, evening }))
+      .catch(() => setLoadError(true))
+      .finally(() => setIsLoadingDefinitions(false));
+    void AccessibilityInfo.announceForAccessibility(
+      `Ajouter ${product.name} à une routine`,
+    );
+  }, [product.name, visible]);
+
+  const toggleWeekday = (weekday: Weekday) => {
+    if (compatiblePlaceholder) return;
+    setSelectedWeekdays((current) =>
+      current.includes(weekday)
+        ? current.filter((candidate) => candidate !== weekday)
+        : [...current, weekday],
+    );
+  };
+
+  return (
+    <Modal
+      animationType="none"
+      onRequestClose={onClose}
+      presentationStyle="pageSheet"
+      visible={visible}
+    >
+      <View
+        style={[styles.routineSheet, { backgroundColor: colors.background }]}
+      >
+        <ScrollView
+          contentContainerStyle={[
+            styles.routineSheetContent,
+            {
+              paddingBottom: insets.bottom + 24,
+              paddingTop: 24,
+            },
+          ]}
+        >
+          <View style={styles.routineSheetHeader}>
+            <Text
+              accessibilityRole="header"
+              style={[styles.routineSheetTitle, { color: colors.text }]}
+            >
+              Ajouter à une routine
+            </Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Fermer le choix de routine"
+              onPress={onClose}
+              style={styles.routineSheetClose}
+            >
+              <AppSymbol name="xmark" color={colors.tint} size={18} />
+            </Pressable>
+          </View>
+          <Text style={[styles.routineSheetProduct, { color: colors.text }]}>
+            {product.name}
+          </Text>
+          <Text style={[styles.formIntro, { color: colors.textSecondary }]}>
+            Choisis la routine puis les jours d’utilisation.
+          </Text>
+
+          <View style={styles.routinePeriodChoices}>
+            {(['morning', 'evening'] as const).map((candidate) => {
+              const selected = candidate === period;
+              return (
+                <Pressable
+                  key={candidate}
+                  accessibilityRole="radio"
+                  accessibilityState={{ selected }}
+                  onPress={() => setPeriod(candidate)}
+                  style={({ pressed }) => [
+                    styles.routinePeriodChoice,
+                    {
+                      backgroundColor: selected
+                        ? colors.backgroundSelected
+                        : colors.background,
+                      borderColor: selected ? colors.tint : colors.separator,
+                      opacity: pressed ? 0.72 : 1,
+                    },
+                  ]}
+                >
+                  <Text
+                    style={[styles.routineChoiceTitle, { color: colors.text }]}
+                  >
+                    {candidate === 'morning' ? 'Matin' : 'Soir'}
+                  </Text>
+                  <Text
+                    style={[styles.fieldHint, { color: colors.textSecondary }]}
+                  >
+                    {definitions[candidate]
+                      ? routineNameForPeriod(candidate)
+                      : 'Sera créée'}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+
+          <View style={styles.routineDaysSection}>
+            <Text style={[styles.fieldLabel, { color: colors.text }]}>
+              Jours
+            </Text>
+            {compatiblePlaceholder ? (
+              <Text style={[styles.fieldHint, { color: colors.textSecondary }]}>
+                Le placeholder {category.toLocaleLowerCase('fr-FR')} sera
+                remplacé. Ses jours et son instruction seront conservés.
+              </Text>
+            ) : null}
+            <View style={styles.routineWeekdays}>
+              {ROUTINE_WEEKDAYS.map((weekday) => {
+                const selected = effectiveWeekdays.includes(weekday.value);
+                return (
+                  <Pressable
+                    key={weekday.value}
+                    accessibilityRole="checkbox"
+                    accessibilityLabel={weekday.label}
+                    accessibilityState={{
+                      checked: selected,
+                      disabled: Boolean(compatiblePlaceholder),
+                    }}
+                    disabled={Boolean(compatiblePlaceholder)}
+                    onPress={() => toggleWeekday(weekday.value)}
+                    style={[
+                      styles.routineWeekday,
+                      {
+                        backgroundColor: selected
+                          ? colors.tint
+                          : colors.backgroundSelected,
+                        opacity: compatiblePlaceholder ? 0.72 : 1,
+                      },
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.routineWeekdayText,
+                        { color: selected ? colors.onTint : colors.text },
+                      ]}
+                    >
+                      {weekday.short}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
+
+          {loadError ? (
+            <Text accessibilityLiveRegion="polite" style={styles.errorText}>
+              Les routines n’ont pas pu être chargées. Tu peux quand même
+              choisir une routine.
+            </Text>
+          ) : null}
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Ajouter ${product.name} à ${routineNameForPeriod(period)}`}
+            accessibilityState={{
+              busy: isBusy,
+              disabled:
+                isBusy ||
+                isLoadingDefinitions ||
+                effectiveWeekdays.length === 0,
+            }}
+            disabled={
+              isBusy || isLoadingDefinitions || effectiveWeekdays.length === 0
+            }
+            onPress={() =>
+              onAdd({ period, selectedWeekdays: effectiveWeekdays })
+            }
+            style={({ pressed }) => [
+              styles.primaryButton,
+              {
+                backgroundColor: colors.tint,
+                opacity:
+                  pressed ||
+                  isBusy ||
+                  isLoadingDefinitions ||
+                  effectiveWeekdays.length === 0
+                    ? 0.62
+                    : 1,
+              },
+            ]}
+          >
+            <Text style={styles.primaryButtonText}>
+              {isBusy
+                ? 'Ajout…'
+                : isLoadingDefinitions
+                  ? 'Chargement…'
+                  : 'Ajouter à la routine'}
+            </Text>
+          </Pressable>
+        </ScrollView>
+      </View>
+    </Modal>
+  );
+}
+
+export function ProductDetail({
+  product,
+  isOwned,
+  isEnriching = false,
+  isSaving = false,
+  message,
+  resultContext,
+  closeLabel,
+  contextualAction,
+  onMarkAsOwned,
+  onRemoveFromCollection,
   onBack,
 }: {
   product: Product;
+  isOwned: boolean;
+  isEnriching?: boolean;
+  isSaving?: boolean;
+  message: string | null;
+  resultContext: ProductResultContext;
+  closeLabel: string;
+  contextualAction?: ProductDetailContextualAction;
+  onMarkAsOwned: () => void;
+  onRemoveFromCollection?: () => void;
   onBack: () => void;
 }) {
   const colors = Colors;
   const insets = useSafeAreaInsets();
-  const ingredients = parseIngredientList(product.ingredientsText ?? '');
+  const ingredients = parseIngredientList(
+    product.ingredientsText && product.ingredientsSource
+      ? product.ingredientsText
+      : '',
+  );
+  const verifiedUsage =
+    product.usageText && product.usageSource ? product.usageText : null;
+  const verifiedPrecautions =
+    product.precautionsText && product.precautionsSource
+      ? product.precautionsText
+      : null;
+  const [ingredientsExpanded, setIngredientsExpanded] = useState(false);
+  const [sourcesExpanded, setSourcesExpanded] = useState(false);
+  const sources = evidenceSources(product);
+  const confidence =
+    product.informationConfidence && product.confidenceSource
+      ? {
+          high: {
+            label: 'Élevée',
+            detail: 'Les informations d’identité sont bien étayées.',
+          },
+          moderate: {
+            label: 'Modérée',
+            detail:
+              'La source est identifiée, mais la fiche peut être incomplète.',
+          },
+          limited: {
+            label: 'Limitée',
+            detail: 'Certaines informations restent à confirmer.',
+          },
+        }[product.informationConfidence]
+      : null;
   return (
     <View style={[styles.screen, { backgroundColor: colors.background }]}>
       <ScrollView
@@ -3035,83 +4094,361 @@ function ProductDetail({
           { paddingBottom: insets.bottom + 48, paddingTop: insets.top + 12 },
         ]}
       >
-        <View style={styles.navRow}>
+        <View style={styles.detailNavRow}>
           <Pressable
             accessibilityRole="button"
+            accessibilityLabel={closeLabel}
             onPress={onBack}
-            style={styles.navAction}
+            style={styles.detailBackAction}
           >
+            <AppSymbol name="chevron.left" color={colors.tint} size={16} />
             <Text style={[styles.cancelText, { color: colors.tint }]}>
-              Retour
+              {closeLabel}
             </Text>
           </Pressable>
-          <Text style={[styles.navTitle, { color: colors.text }]}>Produit</Text>
-          <View style={styles.navBalance} />
+          <Text style={[styles.detailNavTitle, { color: colors.text }]}>
+            Produit
+          </Text>
         </View>
         {product.imageUrl ? (
           <Image
             source={product.imageUrl}
             style={styles.detailImage}
             contentFit="contain"
+            accessibilityLabel={`Photo de ${[product.brand, product.name].filter(Boolean).join(' ')}`}
           />
-        ) : null}
-        <Text style={[styles.candidateTitle, { color: colors.text }]}>
-          {product.name}
-        </Text>
-        <Text style={[styles.productMeta, { color: colors.textSecondary }]}>
-          {[product.brand, product.category].filter(Boolean).join(' · ')}
-        </Text>
-        {product.imageSource ? (
-          <Pressable
-            accessibilityRole={product.imageSourceUrl ? 'link' : undefined}
-            disabled={!product.imageSourceUrl}
-            onPress={() =>
-              product.imageSourceUrl &&
-              void Linking.openURL(product.imageSourceUrl)
-            }
-            style={styles.inlineAction}
-          >
-            <Text style={[styles.imageCredit, { color: colors.tint }]}>
-              Image : {product.imageSource}
-              {product.imageLicense ? ` · ${product.imageLicense}` : ''}
-            </Text>
-          </Pressable>
-        ) : null}
-        {ingredients.length ? (
+        ) : (
           <View
+            accessibilityLabel="Photo indisponible"
             style={[
-              styles.ingredientsSection,
-              { borderColor: colors.separator },
+              styles.detailImage,
+              styles.detailImagePlaceholder,
+              { backgroundColor: colors.backgroundSelected },
             ]}
           >
-            <Text style={[styles.routineChoiceTitle, { color: colors.text }]}>
-              Ingrédients
+            <AppSymbol name="photo" color={colors.textSecondary} size={32} />
+            <Text style={[styles.imageCredit, { color: colors.textSecondary }]}>
+              Photo indisponible
             </Text>
-            {ingredients.map((ingredient) => (
-              <View
-                key={`${ingredient.position}-${ingredient.normalizedName}`}
+          </View>
+        )}
+        <Text
+          accessibilityRole="header"
+          style={[styles.candidateTitle, { color: colors.text }]}
+        >
+          {product.name}
+        </Text>
+        {product.brand ? (
+          <Text style={[styles.detailBrand, { color: colors.textSecondary }]}>
+            {product.brand}
+          </Text>
+        ) : null}
+        {resultContext !== 'collection' && !isOwned ? (
+          <Text style={[styles.formIntro, { color: colors.textSecondary }]}>
+            Cette consultation ne modifie pas Mes produits.
+          </Text>
+        ) : null}
+        {isEnriching ? (
+          <View accessibilityLiveRegion="polite" style={styles.lookupRow}>
+            <ActivityIndicator color={colors.tint} />
+            <Text style={[styles.lookupText, { color: colors.textSecondary }]}>
+              Photo et ingrédients en cours de récupération…
+            </Text>
+          </View>
+        ) : null}
+        {message ? <Notice message={message} /> : null}
+        <InformationSection title="En bref">
+          <View style={styles.detailFact}>
+            <Text
+              style={[styles.detailFactLabel, { color: colors.textSecondary }]}
+            >
+              Rôle
+            </Text>
+            <Text style={[styles.detailFactValue, { color: colors.text }]}>
+              {product.category || 'Catégorie indisponible'}
+            </Text>
+          </View>
+          <View style={styles.detailFact}>
+            <Text
+              style={[styles.detailFactLabel, { color: colors.textSecondary }]}
+            >
+              Usage
+            </Text>
+            <Text style={[styles.detailFactValue, { color: colors.text }]}>
+              {verifiedUsage || 'Usage non disponible'}
+            </Text>
+            {verifiedUsage && product.usageSource ? (
+              <Text
+                style={[styles.sourceSummary, { color: colors.textSecondary }]}
+              >
+                Source : {displaySourceName(product.usageSource)}
+              </Text>
+            ) : null}
+          </View>
+        </InformationSection>
+
+        <InformationSection title="Ingrédients disponibles">
+          {ingredients.length ? (
+            <>
+              <Text
                 style={[
-                  styles.ingredientRow,
-                  { borderColor: colors.separator },
+                  styles.detailSupportingText,
+                  { color: colors.textSecondary },
                 ]}
               >
+                {ingredients.length} ingrédient
+                {ingredients.length > 1 ? 's' : ''} dans la liste INCI. L’ordre
+                ne désigne pas à lui seul les ingrédients clés.
+              </Text>
+              {(ingredientsExpanded
+                ? ingredients
+                : ingredients.slice(0, 3)
+              ).map((ingredient) => (
+                <View
+                  key={`${ingredient.position}-${ingredient.normalizedName}`}
+                  style={[
+                    styles.ingredientRow,
+                    { borderColor: colors.separator },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.ingredientPosition,
+                      { color: colors.textSecondary },
+                    ]}
+                  >
+                    {ingredient.position + 1}
+                  </Text>
+                  <Text style={[styles.ingredientName, { color: colors.text }]}>
+                    {ingredient.name}
+                  </Text>
+                </View>
+              ))}
+              {ingredients.length > 3 ? (
+                <Disclosure
+                  expanded={ingredientsExpanded}
+                  label={
+                    ingredientsExpanded
+                      ? 'Masquer la liste complète'
+                      : `Voir la liste complète (${ingredients.length})`
+                  }
+                  onPress={() => setIngredientsExpanded((current) => !current)}
+                >
+                  <View />
+                </Disclosure>
+              ) : null}
+              {product.ingredientsSource ? (
                 <Text
                   style={[
-                    styles.ingredientPosition,
+                    styles.sourceSummary,
                     { color: colors.textSecondary },
                   ]}
                 >
-                  {ingredient.position + 1}
+                  Source : {displaySourceName(product.ingredientsSource)}
                 </Text>
-                <Text style={[styles.ingredientName, { color: colors.text }]}>
-                  {ingredient.name}
+              ) : null}
+            </>
+          ) : (
+            <Text style={[styles.detailFactValue, { color: colors.text }]}>
+              Ingrédients indisponibles. Aucune liste fiable n’est enregistrée
+              pour cette fiche.
+            </Text>
+          )}
+        </InformationSection>
+
+        <InformationSection title="Précautions vérifiées">
+          <Text style={[styles.detailFactValue, { color: colors.text }]}>
+            {verifiedPrecautions ||
+              'Aucune précaution vérifiée n’est disponible pour cette fiche.'}
+          </Text>
+          {verifiedPrecautions && product.precautionsSource ? (
+            <Text
+              style={[styles.sourceSummary, { color: colors.textSecondary }]}
+            >
+              Source : {displaySourceName(product.precautionsSource)}
+            </Text>
+          ) : null}
+        </InformationSection>
+
+        <InformationSection title="Confiance des informations">
+          <Text style={[styles.confidenceLabel, { color: colors.text }]}>
+            {confidence
+              ? `Confiance ${confidence.label.toLocaleLowerCase('fr-FR')}`
+              : 'Confiance non évaluée'}
+          </Text>
+          <Text
+            style={[
+              styles.detailSupportingText,
+              { color: colors.textSecondary },
+            ]}
+          >
+            {(confidence ? product.confidenceNote : null) ||
+              confidence?.detail ||
+              'Le niveau de confiance n’est pas disponible pour cette fiche.'}
+          </Text>
+          <Text
+            style={[
+              styles.detailSupportingText,
+              { color: colors.textSecondary },
+            ]}
+          >
+            Ce niveau décrit la provenance des informations, pas la qualité ou
+            la sécurité du produit.
+          </Text>
+          {confidence && product.confidenceSource ? (
+            <Text
+              style={[styles.sourceSummary, { color: colors.textSecondary }]}
+            >
+              Source : {displaySourceName(product.confidenceSource)}
+            </Text>
+          ) : null}
+        </InformationSection>
+
+        <InformationSection title="Provenance">
+          <Disclosure
+            expanded={sourcesExpanded}
+            label={
+              sourcesExpanded
+                ? 'Masquer les sources'
+                : 'Voir les sources et licences'
+            }
+            onPress={() => setSourcesExpanded((current) => !current)}
+          >
+            <View style={styles.sourceList}>
+              {sources.length ? (
+                sources.map((source) => (
+                  <SourceReference
+                    key={`${source.label}:${source.name}:${source.url ?? ''}`}
+                    source={source}
+                  />
+                ))
+              ) : (
+                <Text
+                  style={[
+                    styles.detailSupportingText,
+                    { color: colors.textSecondary },
+                  ]}
+                >
+                  Provenance détaillée indisponible.
                 </Text>
-              </View>
-            ))}
+              )}
+              {product.imageLicense ? (
+                <Text
+                  style={[
+                    styles.detailSupportingText,
+                    { color: colors.textSecondary },
+                  ]}
+                >
+                  Licence de l’image : {product.imageLicense}
+                </Text>
+              ) : null}
+            </View>
+          </Disclosure>
+        </InformationSection>
+        {contextualAction ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={contextualAction.accessibilityLabel}
+            accessibilityState={{
+              busy: contextualAction.isBusy,
+              disabled: contextualAction.isBusy,
+            }}
+            disabled={contextualAction.isBusy}
+            onPress={contextualAction.onPress}
+            style={({ pressed }) => [
+              contextualAction.emphasis === 'primary'
+                ? styles.primaryButton
+                : styles.secondaryContextAction,
+              contextualAction.emphasis === 'primary'
+                ? { backgroundColor: colors.tint }
+                : { borderColor: colors.separator },
+              {
+                opacity: pressed || contextualAction.isBusy ? 0.65 : 1,
+              },
+            ]}
+          >
+            <Text
+              style={
+                contextualAction.emphasis === 'primary'
+                  ? styles.primaryButtonText
+                  : [styles.secondaryContextActionText, { color: colors.tint }]
+              }
+            >
+              {contextualAction.label}
+            </Text>
+          </Pressable>
+        ) : null}
+        {isOwned ? (
+          <View
+            accessibilityLabel="Dans Mes produits"
+            style={[
+              styles.ownedStatus,
+              { backgroundColor: colors.backgroundSelected },
+            ]}
+          >
+            <AppSymbol
+              name="checkmark.circle.fill"
+              color={colors.tint}
+              size={20}
+            />
+            <Text style={[styles.ownedStatusText, { color: colors.text }]}>
+              Dans Mes produits
+            </Text>
           </View>
         ) : (
-          <Notice message="La liste d’ingrédients n’est pas encore disponible." />
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Je l’ai, ajouter à Mes produits"
+            accessibilityState={{ busy: isSaving, disabled: isSaving }}
+            disabled={isSaving}
+            onPress={onMarkAsOwned}
+            style={({ pressed }) => [
+              contextualAction
+                ? styles.secondaryContextAction
+                : styles.primaryButton,
+              {
+                ...(contextualAction
+                  ? { borderColor: colors.separator }
+                  : { backgroundColor: colors.tint }),
+                opacity: pressed || isSaving ? 0.65 : 1,
+              },
+            ]}
+          >
+            <Text
+              style={
+                contextualAction
+                  ? [styles.secondaryContextActionText, { color: colors.tint }]
+                  : styles.primaryButtonText
+              }
+            >
+              {isSaving ? 'Ajout…' : 'Je l’ai'}
+            </Text>
+          </Pressable>
         )}
+        {isOwned && onRemoveFromCollection ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Retirer ${product.name} de Mes produits`}
+            accessibilityState={{
+              busy: isSaving,
+              disabled: isSaving,
+            }}
+            disabled={isSaving}
+            onPress={onRemoveFromCollection}
+            style={({ pressed }) => [
+              styles.removeCollectionAction,
+              {
+                opacity: pressed || isSaving ? 0.65 : 1,
+              },
+            ]}
+          >
+            <Text
+              style={[styles.removeCollectionText, { color: colors.error }]}
+            >
+              Retirer de Mes produits
+            </Text>
+          </Pressable>
+        ) : null}
       </ScrollView>
     </View>
   );
@@ -3210,7 +4547,7 @@ function AppSymbol({
 
 const styles = StyleSheet.create({
   screen: { flex: 1 },
-  catalogue: { gap: 16, paddingBottom: 148, paddingHorizontal: 24 },
+  catalogue: { gap: 16, paddingBottom: 188, paddingHorizontal: 24 },
   catalogueHeader: { gap: 16 },
   largeTitle: {
     fontSize: 34,
@@ -3258,6 +4595,17 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
   },
   primaryButtonText: { color: Colors.onTint, fontSize: 17, fontWeight: '700' },
+  outlineButton: {
+    alignItems: 'center',
+    borderRadius: 12,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 8,
+    justifyContent: 'center',
+    minHeight: 48,
+    paddingHorizontal: 16,
+  },
+  outlineButtonText: { fontSize: 17, fontWeight: '600' },
   secondaryAction: {
     alignItems: 'center',
     justifyContent: 'center',
@@ -3284,6 +4632,34 @@ const styles = StyleSheet.create({
   productName: { fontSize: 17, fontWeight: '600', lineHeight: 22 },
   productMeta: { fontSize: 15, lineHeight: 20 },
   candidateSource: { fontSize: 13, lineHeight: 18, marginTop: 2 },
+  textSearchScreen: { gap: 20, paddingHorizontal: 24 },
+  textSearchNavRow: { minHeight: 44 },
+  textSearchIntro: { gap: 8 },
+  textSearchField: { gap: 12 },
+  textSearchInput: {
+    borderRadius: 12,
+    borderWidth: 1,
+    fontSize: 17,
+    minHeight: 50,
+    paddingHorizontal: 14,
+  },
+  textSearchResults: { gap: 12 },
+  textSearchResultsHeader: { gap: 4 },
+  textSearchResult: {
+    alignItems: 'center',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: 12,
+    minHeight: 82,
+    paddingVertical: 12,
+  },
+  searchEmptyState: {
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 12,
+    paddingTop: 24,
+  },
+  searchFallbackActions: { gap: 4 },
   scanner: { backgroundColor: Colors.cameraBackground, flex: 1 },
   scannerHighlights: {
     ...StyleSheet.absoluteFillObject,
@@ -3563,6 +4939,59 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     width: 220,
   },
+  detailImagePlaceholder: {
+    alignItems: 'center',
+    gap: 8,
+    justifyContent: 'center',
+  },
+  detailNavRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 12,
+    minHeight: 44,
+  },
+  detailBackAction: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    flexShrink: 1,
+    gap: 4,
+    minHeight: 44,
+  },
+  detailNavTitle: {
+    fontSize: 17,
+    fontWeight: '700',
+    marginLeft: 'auto',
+  },
+  detailBrand: { fontSize: 17, lineHeight: 24 },
+  detailSection: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    gap: 12,
+    paddingTop: 18,
+  },
+  detailSectionTitle: { fontSize: 20, fontWeight: '700', lineHeight: 25 },
+  detailFact: { gap: 4 },
+  detailFactLabel: { fontSize: 15, fontWeight: '600', lineHeight: 20 },
+  detailFactValue: { fontSize: 17, lineHeight: 24 },
+  detailSupportingText: { fontSize: 15, lineHeight: 21 },
+  sourceSummary: { fontSize: 13, lineHeight: 18 },
+  confidenceLabel: { fontSize: 17, fontWeight: '600', lineHeight: 23 },
+  disclosureAction: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 8,
+    justifyContent: 'space-between',
+    minHeight: 44,
+  },
+  disclosureLabel: { flex: 1, fontSize: 16, fontWeight: '600', lineHeight: 22 },
+  sourceList: { gap: 4, paddingTop: 4 },
+  sourceReference: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 8,
+    justifyContent: 'space-between',
+    minHeight: 44,
+  },
+  sourceLabel: { flex: 1, fontSize: 15, lineHeight: 20 },
   productImageBlock: { alignItems: 'center', gap: 6 },
   imageCredit: { fontSize: 12, lineHeight: 16 },
   imagePlaceholder: { alignItems: 'center', justifyContent: 'center' },
@@ -3651,24 +5080,65 @@ const styles = StyleSheet.create({
     padding: 14,
   },
   noticeText: { flex: 1, fontSize: 15, lineHeight: 20 },
-  association: {
+  ownedStatus: {
     alignItems: 'center',
-    flexGrow: 1,
-    gap: 16,
-    paddingHorizontal: 24,
-  },
-  associationTitle: {
-    fontSize: 28,
-    fontWeight: '700',
-    letterSpacing: -0.4,
-    textAlign: 'center',
-  },
-  routineChoice: {
-    alignSelf: 'stretch',
     borderRadius: 12,
+    flexDirection: 'row',
     gap: 4,
-    padding: 16,
+    minHeight: 50,
+    paddingHorizontal: 16,
   },
-  routineChoiceLabel: { fontSize: 13, fontWeight: '600' },
+  ownedStatusText: { fontSize: 17, fontWeight: '600' },
+  secondaryContextAction: {
+    alignItems: 'center',
+    borderRadius: 12,
+    borderWidth: 1,
+    justifyContent: 'center',
+    minHeight: 50,
+    paddingHorizontal: 16,
+  },
+  secondaryContextActionText: { fontSize: 17, fontWeight: '600' },
+  removeCollectionAction: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 44,
+    paddingHorizontal: 16,
+  },
+  removeCollectionText: { fontSize: 16, fontWeight: '600' },
+  routineSheet: { flex: 1 },
+  routineSheetContent: { gap: 20, paddingHorizontal: 24 },
+  routineSheetHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  routineSheetTitle: { flex: 1, fontSize: 28, fontWeight: '700' },
+  routineSheetClose: {
+    alignItems: 'center',
+    height: 44,
+    justifyContent: 'center',
+    width: 44,
+  },
+  routineSheetProduct: { fontSize: 20, fontWeight: '600', lineHeight: 26 },
+  routinePeriodChoices: { flexDirection: 'row', gap: 10 },
+  routinePeriodChoice: {
+    borderRadius: 12,
+    borderWidth: 1,
+    flex: 1,
+    gap: 4,
+    minHeight: 72,
+    padding: 12,
+  },
+  fieldHint: { fontSize: 14, lineHeight: 20 },
+  routineDaysSection: { gap: 10 },
+  routineWeekdays: { flexDirection: 'row', flexWrap: 'wrap', gap: 4 },
+  routineWeekday: {
+    alignItems: 'center',
+    borderRadius: 12,
+    height: 44,
+    justifyContent: 'center',
+    width: 44,
+  },
+  routineWeekdayText: { fontSize: 16, fontWeight: '700' },
   routineChoiceTitle: { fontSize: 18, fontWeight: '700' },
 });

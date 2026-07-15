@@ -1,5 +1,6 @@
 import {
   hasProductCandidateImage,
+  candidateToDraft,
   hasDecisiveCandidate,
   hasReliableCandidate,
   criticalProductVariantsMatch,
@@ -11,6 +12,7 @@ import {
   normalizeProductText,
   productLookupTextFromRecognizedText,
   selectProductCandidates,
+  selectTextSearchCandidates,
   textLookupQuery,
   type ProductCandidate,
 } from './product-recognition';
@@ -227,6 +229,36 @@ describe('product text recognition', () => {
     ).toBe(false);
   });
 
+  it('supports deliberate search by product name without requiring the brand', () => {
+    const selected = selectTextSearchCandidates(
+      'Foaming Facial Cleanser',
+      candidates,
+    );
+
+    expect(selected).toEqual([
+      expect.objectContaining({ id: 'cleanser', score: 0.94 }),
+    ]);
+    expect(hasDecisiveCandidate(selected)).toBe(true);
+  });
+
+  it('keeps a brand-only search confirmable instead of choosing a product', () => {
+    const selected = selectTextSearchCandidates('CeraVe', candidates);
+
+    expect(selected.map(({ id }) => id)).toEqual(['cleanser', 'cream']);
+    expect(hasReliableCandidate(selected)).toBe(false);
+    expect(hasDecisiveCandidate(selected)).toBe(false);
+  });
+
+  it('keeps critical variant constraints in deliberate text search', () => {
+    const selected = selectTextSearchCandidates('CeraVe Crème SPF 30', [
+      { ...candidates[1], id: 'base', name: 'Crème' },
+      { ...candidates[1], id: 'spf50', name: 'Crème SPF50' },
+      { ...candidates[1], id: 'spf30', name: 'Crème SPF30' },
+    ]);
+
+    expect(selected).toEqual([expect.objectContaining({ id: 'spf30' })]);
+  });
+
   it('removes duplicate public catalogue variants', () => {
     const selected = selectProductCandidates('CeraVe Foaming Cleanser', [
       candidates[0],
@@ -256,6 +288,27 @@ describe('product text recognition', () => {
         imageUrl: 'https://example.com/product.webp',
       }),
     ).toBe(true);
+  });
+
+  it('preserves sourced essential details when a candidate becomes a draft', () => {
+    expect(
+      candidateToDraft({
+        ...candidates[0],
+        usageText: 'Appliquer puis rincer.',
+        usageSource: 'Fabricant',
+        precautionsText: 'Éviter le contact direct avec les yeux.',
+        precautionsSource: 'Fabricant',
+        informationConfidence: 'moderate',
+        confidenceSource: 'Catalogue partagé',
+        confidenceNote: 'Certaines informations restent à confirmer.',
+      }),
+    ).toMatchObject({
+      usageText: 'Appliquer puis rincer.',
+      usageSource: 'Fabricant',
+      precautionsSource: 'Fabricant',
+      informationConfidence: 'moderate',
+      confidenceSource: 'Catalogue partagé',
+    });
   });
 
   it('prefills manual entry from the first useful OCR lines', () => {

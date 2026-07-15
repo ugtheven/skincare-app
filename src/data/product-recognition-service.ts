@@ -3,9 +3,11 @@ import type { RecognizedPackagingText } from './on-device-text-recognition';
 import type { Product, ProductDraft } from '@/domain/product';
 import { isValidGtin } from '@/domain/product-auto-capture';
 import {
+  hasReliableCandidate,
   manualDraftFromRecognizedText,
   productLookupTextFromRecognizedText,
   selectProductCandidates,
+  selectTextSearchCandidates,
   type ProductCandidate,
 } from '@/domain/product-recognition';
 
@@ -15,6 +17,69 @@ export type PhotoRecognitionDependencies = {
   searchShared: (lookupText: string) => Promise<ProductCandidate[] | undefined>;
   searchPublic: (lookupText: string) => Promise<ProductCandidate[]>;
 };
+
+export type TextProductSearchDependencies = {
+  searchLocal: (query: string) => Promise<ProductCandidate[]>;
+  searchShared: (query: string) => Promise<ProductCandidate[] | undefined>;
+  searchPublic: (query: string) => Promise<ProductCandidate[]>;
+};
+
+export type TextProductSearchOutcome =
+  | {
+      kind: 'results';
+      candidates: ProductCandidate[];
+      isPartial: boolean;
+    }
+  | { kind: 'not_found'; isPartial: boolean }
+  | { kind: 'unavailable' };
+
+export async function searchProductsByText(
+  query: string,
+  dependencies: TextProductSearchDependencies,
+): Promise<TextProductSearchOutcome> {
+  const normalizedQuery = query.trim();
+  if (!normalizedQuery) return { kind: 'not_found', isPartial: false };
+
+  let localCandidates: ProductCandidate[] = [];
+  try {
+    localCandidates = selectTextSearchCandidates(
+      normalizedQuery,
+      await dependencies.searchLocal(normalizedQuery),
+    );
+  } catch {
+    // A damaged local cache must not block the shared and public catalogues.
+  }
+
+  if (hasReliableCandidate(localCandidates)) {
+    return { kind: 'results', candidates: localCandidates, isPartial: false };
+  }
+
+  const [sharedLookup, publicLookup] = await Promise.allSettled([
+    dependencies.searchShared(normalizedQuery),
+    dependencies.searchPublic(normalizedQuery),
+  ]);
+  const sharedAvailable =
+    sharedLookup.status === 'fulfilled' && sharedLookup.value !== undefined;
+  const publicAvailable = publicLookup.status === 'fulfilled';
+  const candidates = selectTextSearchCandidates(normalizedQuery, [
+    ...localCandidates,
+    ...(sharedLookup.status === 'fulfilled' ? (sharedLookup.value ?? []) : []),
+    ...(publicLookup.status === 'fulfilled' ? publicLookup.value : []),
+  ]);
+
+  if (candidates.length) {
+    return {
+      kind: 'results',
+      candidates,
+      isPartial: !sharedAvailable || !publicAvailable,
+    };
+  }
+  if (!sharedAvailable && !publicAvailable) return { kind: 'unavailable' };
+  return {
+    kind: 'not_found',
+    isPartial: !sharedAvailable || !publicAvailable,
+  };
+}
 
 export type PhotoRecognitionOutcome =
   | {
@@ -151,6 +216,28 @@ export function mergeBarcodeEnrichment(
           ingredientsText: enriched.ingredientsText,
           ingredientsSource: enriched.ingredientsSource,
           ingredientsSourceUrl: enriched.ingredientsSourceUrl,
+        }
+      : {}),
+    ...(enriched.usageText.trim() && enriched.usageSource.trim()
+      ? {
+          usageText: enriched.usageText,
+          usageSource: enriched.usageSource,
+          usageSourceUrl: enriched.usageSourceUrl,
+        }
+      : {}),
+    ...(enriched.precautionsText.trim() && enriched.precautionsSource.trim()
+      ? {
+          precautionsText: enriched.precautionsText,
+          precautionsSource: enriched.precautionsSource,
+          precautionsSourceUrl: enriched.precautionsSourceUrl,
+        }
+      : {}),
+    ...(enriched.informationConfidence && enriched.confidenceSource.trim()
+      ? {
+          informationConfidence: enriched.informationConfidence,
+          confidenceSource: enriched.confidenceSource,
+          confidenceSourceUrl: enriched.confidenceSourceUrl,
+          confidenceNote: enriched.confidenceNote,
         }
       : {}),
   };

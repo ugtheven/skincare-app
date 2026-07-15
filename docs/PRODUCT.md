@@ -86,21 +86,29 @@ Use language about care, comfort, routine, protection, reactions, and progress. 
 
 ### Products
 
-- Add by barcode, product photo, OCR, text search, or manual entry.
+- Add by barcode, product photo, OCR, text search, or manual entry. V1 text search is a focused product-finding flow; browsing the full shared catalogue remains a later addition.
 - Use a hybrid recognition flow and ask the user to confirm uncertain matches.
-- Explain product purpose, key ingredients, precautions, and confidence.
+- Keep the shared product catalogue distinct from the user's personal collection.
+- Let a scan open a product for consultation without implicitly marking it as owned.
+- Add an owned product to the personal collection through an explicit action; adding it to a routine also marks it as owned.
+- Use an essential product page to explain product purpose, available key ingredients, verified precautions, provenance, and confidence.
 - Provide a simple summary with optional detail.
 - Avoid arbitrary universal scores such as "good" or "bad" while preserving authoritative warnings.
 
 ### Routines
 
-- Morning, evening, weekly, or selected-day routines.
-- Ordered product steps with simple scheduling and optional instructions.
-- Complete or undo a step in one tap.
+- One active morning routine and one active evening routine.
+- Ordered steps containing either one product or a completable category placeholder.
+- Per-step scheduling for every day, selected weekdays, or temporary deactivation.
+- Category-based order suggestions that remain manually editable.
+- Optional short instructions, with quantities and wait times deferred.
+- Complete, undo, or skip a step for today in one tap.
+- Preserve past routine snapshots when a routine or owned product changes.
 
 ### Today
 
-- Current routine and progress.
+- Open the routine relevant to the current moment while keeping the other routine accessible.
+- Show only the steps planned for the current routine day and their progress.
 - Relevant sun-protection status.
 - Next routine or skin check-in when useful.
 - No content feed, promotions, or overloaded dashboard.
@@ -127,6 +135,7 @@ Use language about care, comfort, routine, protection, reactions, and progress. 
 - Progress
 
 Settings, profile, and advanced routine management remain secondary.
+Scanning remains a reusable product action available from relevant flows, not a top-level tab.
 
 ## Outside V1
 
@@ -139,6 +148,9 @@ Settings, profile, and advanced routine management remain secondary.
 
 ## Likely later additions
 
+- Browsable shared product catalogue with richer product pages.
+- Personal "want" list distinct from owned products.
+- Community ratings and reviews after account, moderation, privacy, and anti-abuse rules are defined.
 - Guided introduction of new products.
 - Whole-routine compatibility checks.
 - Stock and opening-date management.

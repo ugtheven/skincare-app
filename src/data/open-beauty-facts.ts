@@ -1,6 +1,7 @@
-import type { ProductDraft } from '@/domain/product';
+import { emptyProductDraft, type ProductDraft } from '@/domain/product';
 import {
   normalizeProductCategory,
+  normalizeProductText,
   textLookupQuery,
   type ProductCandidate,
 } from '@/domain/product-recognition';
@@ -57,6 +58,7 @@ export function productDraftFromLookup(
   }
 
   return {
+    ...emptyProductDraft,
     name: response.product.product_name.trim(),
     brand: response.product.brands?.trim() ?? '',
     category:
@@ -86,25 +88,37 @@ export function productCandidatesFromSearch(
 ): ProductCandidate[] {
   return (response.products ?? [])
     .filter((product) => product.product_name?.trim())
-    .map((product, index) => ({
-      id: `open-beauty-facts:${product.code ?? index}`,
-      name: product.product_name!.trim(),
-      brand: product.brands?.trim() || null,
-      category:
-        normalizeProductCategory(
-          product.categories?.split(',')[0],
-          product.product_name!,
-        ) || 'Autre',
-      imageUrl: null,
-      ingredientsText: ingredientsText(product) || null,
-      ingredientsSource: ingredientsText(product) ? 'Open Beauty Facts' : null,
-      ingredientsSourceUrl:
-        ingredientsText(product) && product.code
-          ? `https://world.openbeautyfacts.org/product/${encodeURIComponent(product.code)}`
-          : null,
-      score: 0,
-      source: 'open-beauty-facts' as const,
-    }));
+    .map((product) => {
+      const sourceUrl = product.code
+        ? `https://world.openbeautyfacts.org/product/${encodeURIComponent(product.code)}`
+        : null;
+      const sourceName = 'Open Beauty Facts (ODbL 1.0)';
+      const stableIdentity = normalizeProductText(
+        [product.brands, product.product_name].filter(Boolean).join(' '),
+      );
+      return {
+        id: `open-beauty-facts:${product.code ?? stableIdentity}`,
+        name: product.product_name!.trim(),
+        brand: product.brands?.trim() || null,
+        category:
+          normalizeProductCategory(
+            product.categories?.split(',')[0],
+            product.product_name!,
+          ) || 'Autre',
+        // Public images are not reused until their own licence is recorded.
+        imageUrl: null,
+        ingredientsText: ingredientsText(product) || null,
+        ingredientsSource: ingredientsText(product) ? sourceName : null,
+        ingredientsSourceUrl: ingredientsText(product) ? sourceUrl : null,
+        informationConfidence: 'limited' as const,
+        confidenceSource: sourceName,
+        confidenceSourceUrl: sourceUrl,
+        confidenceNote:
+          'Identité issue d’un catalogue public et à confirmer sur l’emballage.',
+        score: 0,
+        source: 'open-beauty-facts' as const,
+      };
+    });
 }
 
 export async function lookupProductByBarcode(

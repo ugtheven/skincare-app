@@ -3,7 +3,10 @@ import 'expo-sqlite/localStorage/install';
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
-import type { ProductDraft } from '@/domain/product';
+import type {
+  ProductDraft,
+  ProductInformationConfidence,
+} from '@/domain/product';
 import {
   normalizeProductCategory,
   textLookupQuery,
@@ -24,6 +27,16 @@ type SharedProduct = {
   ingredientsText?: string | null;
   ingredientsSource?: string | null;
   ingredientsSourceUrl?: string | null;
+  usageText?: string | null;
+  usageSource?: string | null;
+  usageSourceUrl?: string | null;
+  precautionsText?: string | null;
+  precautionsSource?: string | null;
+  precautionsSourceUrl?: string | null;
+  informationConfidence?: ProductInformationConfidence | null;
+  confidenceSource?: string | null;
+  confidenceSourceUrl?: string | null;
+  confidenceNote?: string | null;
 };
 
 type LookupResponse = { matches: SharedProduct[] };
@@ -227,6 +240,16 @@ export async function lookupSharedProductByIdentifier(
     ingredientsText: product.ingredientsText ?? '',
     ingredientsSource: product.ingredientsSource ?? '',
     ingredientsSourceUrl: product.ingredientsSourceUrl ?? '',
+    usageText: product.usageText ?? '',
+    usageSource: product.usageSource ?? '',
+    usageSourceUrl: product.usageSourceUrl ?? '',
+    precautionsText: product.precautionsText ?? '',
+    precautionsSource: product.precautionsSource ?? '',
+    precautionsSourceUrl: product.precautionsSourceUrl ?? '',
+    informationConfidence: product.informationConfidence ?? '',
+    confidenceSource: product.confidenceSource ?? '',
+    confidenceSourceUrl: product.confidenceSourceUrl ?? '',
+    confidenceNote: product.confidenceNote ?? '',
     source: 'barcode',
   };
 }
@@ -271,6 +294,16 @@ export async function lookupSharedProductsByText(
     ingredientsText: product.ingredientsText ?? null,
     ingredientsSource: product.ingredientsSource ?? null,
     ingredientsSourceUrl: product.ingredientsSourceUrl ?? null,
+    usageText: product.usageText ?? null,
+    usageSource: product.usageSource ?? null,
+    usageSourceUrl: product.usageSourceUrl ?? null,
+    precautionsText: product.precautionsText ?? null,
+    precautionsSource: product.precautionsSource ?? null,
+    precautionsSourceUrl: product.precautionsSourceUrl ?? null,
+    informationConfidence: product.informationConfidence ?? null,
+    confidenceSource: product.confidenceSource ?? null,
+    confidenceSourceUrl: product.confidenceSourceUrl ?? null,
+    confidenceNote: product.confidenceNote ?? null,
     score: product.score ?? 0,
     source: 'shared',
   }));
@@ -331,6 +364,16 @@ export async function lookupProductsByVisualFallback(
       ingredientsText: product.ingredientsText ?? null,
       ingredientsSource: product.ingredientsSource ?? null,
       ingredientsSourceUrl: product.ingredientsSourceUrl ?? null,
+      usageText: product.usageText ?? null,
+      usageSource: product.usageSource ?? null,
+      usageSourceUrl: product.usageSourceUrl ?? null,
+      precautionsText: product.precautionsText ?? null,
+      precautionsSource: product.precautionsSource ?? null,
+      precautionsSourceUrl: product.precautionsSourceUrl ?? null,
+      informationConfidence: product.informationConfidence ?? null,
+      confidenceSource: product.confidenceSource ?? null,
+      confidenceSourceUrl: product.confidenceSourceUrl ?? null,
+      confidenceNote: product.confidenceNote ?? null,
       score: product.score ?? 0,
       source: product.matchSource === 'catalogue' ? 'shared' : 'google-web',
     }),

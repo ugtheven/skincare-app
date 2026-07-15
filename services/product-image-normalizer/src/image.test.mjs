@@ -42,6 +42,35 @@ test('normalizes a portrait source onto an exact 1024 square canvas', async () =
   assert.equal(metadata.format, 'webp');
 });
 
+test('accepts a product packshot on a light uniform studio background', async () => {
+  const source = await sharp({
+    create: {
+      width: 800,
+      height: 800,
+      channels: 3,
+      background: '#f2e6d8',
+    },
+  })
+    .composite([
+      {
+        input: await sharp({
+          create: {
+            width: 240,
+            height: 520,
+            channels: 3,
+            background: '#f8f7f4',
+          },
+        })
+          .png()
+          .toBuffer(),
+      },
+    ])
+    .jpeg()
+    .toBuffer();
+
+  await assert.doesNotReject(() => assertCommercialPackshot(source));
+});
+
 test('rejects a user photo without a commercial background', async () => {
   const source = await sharp({
     create: {

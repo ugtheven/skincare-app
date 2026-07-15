@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The shared catalogue prevents every device from repeating the same external lookup. SQLite remains the local cache and the owner of private routines and products.
+The shared catalogue prevents every device from repeating the same external lookup. SQLite remains the local cache and the owner of private routines and personal ownership state. Cached product identity and the user's collection are distinct concepts.
 
 ## Lookup order
 
@@ -27,6 +27,20 @@ For a first barcode match, the confirmation form refreshes missing photo and ing
 - Ingredient-label OCR remains entirely on-device.
 - Web images are accepted only from `brand_source_domains` and enter the catalogue through a pending, sourced record.
 - Never store raw photos, base64 payloads, or OCR text in logs.
+
+## Public catalogue and alert readiness
+
+The current source-domain, licensing, consent, quota, and pending-submission rules are foundations to preserve. They do not by themselves make the catalogue ready for unrestricted public browsing.
+
+Before the catalogue exploration lot can display evidence-linked ingredient alerts:
+
+- define the minimum fields and review states for publishing, correcting, withdrawing, or rejecting a shared product;
+- complete the production legal review for each data, image, and formula source;
+- store dated formula versions by product and market instead of silently replacing historical formulas;
+- store versioned regulatory and scientific rules with source, jurisdiction, publication date, use conditions, and uncertainty;
+- require a compatible formula, rule, and product context before emitting an alert.
+
+The implementation sequence and acceptance criteria live in session 3.0 of `docs/ROUTINES_CATALOG_ROADMAP.md`.
 
 ## Deploy
 

@@ -48,10 +48,30 @@ function cleanTitle(value: string, brand: string) {
     .trim();
 }
 
-export function serpApiGoogleImagesUrl(apiKey: string, query: string) {
+function approvedSearchDomains(domains: string[]) {
+  return [
+    ...new Set(
+      domains
+        .map((domain) =>
+          domain.toLocaleLowerCase('en-US').replace(/^www\./, ''),
+        )
+        .filter((domain) => /^(?:[a-z0-9-]+\.)+[a-z]{2,}$/.test(domain)),
+    ),
+  ].slice(0, 3);
+}
+
+export function serpApiGoogleImagesUrl(
+  apiKey: string,
+  query: string,
+  manufacturerDomains: string[] = [],
+) {
   const url = new URL('https://serpapi.com/search.json');
+  const domains = approvedSearchDomains(manufacturerDomains);
+  const domainScope = domains.length
+    ? ` (${domains.map((domain) => `site:${domain}`).join(' OR ')})`
+    : '';
   url.searchParams.set('engine', 'google_images');
-  url.searchParams.set('q', query.slice(0, 240));
+  url.searchParams.set('q', `${query}${domainScope}`.slice(0, 240));
   url.searchParams.set('hl', 'fr');
   url.searchParams.set('gl', 'fr');
   url.searchParams.set('safe', 'active');
@@ -185,12 +205,23 @@ export async function searchSerpApiProductImages(
   recognizedBrand = '',
 ) {
   if (!query.trim()) return { candidates: [], retailerHints: [] };
+  const normalizedBrand = normalizeWebText(recognizedBrand);
+  const manufacturerDomains = approvedDomains
+    .filter(
+      ({ brand, source_kind }) =>
+        source_kind === 'manufacturer' &&
+        normalizeWebText(brand) === normalizedBrand,
+    )
+    .map(({ domain }) => domain);
   let response: Response;
   try {
-    response = await fetch(serpApiGoogleImagesUrl(apiKey, query), {
-      headers: { Accept: 'application/json' },
-      signal: AbortSignal.timeout(12_000),
-    });
+    response = await fetch(
+      serpApiGoogleImagesUrl(apiKey, query, manufacturerDomains),
+      {
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(12_000),
+      },
+    );
   } catch {
     throw new SerpApiSearchError('timeout');
   }

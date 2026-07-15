@@ -13,6 +13,55 @@ Record only decisions that should guide future work.
 
 ## Decisions
 
+### 2026-07-15 - Today uses one shared routine day and explicit handled states
+
+- **Status:** accepted
+- **Context:** Today must open the relevant routine, keep the other routine reachable, preserve the evening carryover until 04:00, and aggregate both periods without mixing two local dates after midnight.
+- **Decision:** Treat 04:00 as the start of a routine day. Prefer morning from 04:00 through 17:59 and evening from 18:00 through 03:59. Before 04:00, load both morning and evening occurrences for the previous local date. A completed or deliberately skipped step counts as handled for routine progress, while the neutral day-state derivation remains completed, partially completed, deliberately skipped, not recorded, or no routine scheduled according to the documented aggregation rules.
+- **Consequences:** Switching between morning and evening never changes the routine day being summarized. Skipping advances execution progress without being presented as completion. The 18:00 display threshold is a local Today default, not a reminder time or a user schedule, and changing it later requires a product decision rather than a data migration.
+
+### 2026-07-14 - Essential product confidence is evidence-specific
+
+- **Status:** accepted
+- **Context:** Product recognition exposes a candidate match score, the shared catalogue stores identity confidence, and formulas have their own confidence. Combining them or displaying a percentage would look like a global product verdict and would hide which information remains uncertain.
+- **Decision:** On the essential product page, show only sourced catalogue identity confidence as a qualitative level: limited, moderate, or high. Never present the candidate match score as product confidence. Keep sourced usage and verified precautions optional and fail closed when their source is missing. Present absent facts and confidence as unavailable instead of inferring them from category, formula order, or packaging claims.
+- **Consequences:** Confidence describes information provenance, not product quality, safety, suitability, or efficacy. Formula confidence and future regulatory or scientific alerts remain distinct evidence with their own versioned sources. Manual product entry stays usable without any of these optional fields.
+
+### 2026-07-14 - Essential product access precedes catalogue exploration
+
+- **Status:** accepted
+- **Context:** V1 requires typed product finding and an understandable product result, while browsing a large shared catalogue, maintaining a wish list, and generating evidence-linked ingredient alerts need broader infrastructure. The Today screen also has to evolve without coupling routine delivery to the separate sun-protection and skin-check-in work.
+- **Decision:** Deliver a focused manual text search and one essential product page in the first routines/catalogue lot, before global catalogue browsing. The essential page shows available purpose, key ingredients, verified precautions, provenance, and confidence without inventing missing information. Keep sun protection and skin check-ins in dedicated V1 roadmaps, while making Today composable enough to receive their status and next-action blocks. Before any rich catalogue page emits a regulatory or scientific ingredient alert, version both product formulas and the source-backed rules, including their jurisdiction, publication date, conditions, and uncertainty.
+- **Consequences:** Typed search does not require catalogue pagination, advanced filters, a wish list, or automatic paid visual lookup. The rich catalogue page extends the essential page instead of replacing it. Completing the routine loop does not complete the whole V1. An alert is displayed only when a versioned formula, versioned rule, and sufficient product context support it; otherwise the interface remains neutral and explicit about missing information.
+
+### 2026-07-14 - Product collection and scan are separate concepts
+
+- **Status:** accepted
+- **Context:** A person may scan a product only to inspect it, while the same scanner also needs to support adding a product to a personal collection or routine. Making Scan a tab would turn an action into a navigation destination and would not resolve those different intents.
+- **Decision:** Keep Today, Products, and Progress as the top-level tabs. Treat scanning as a reusable flow launched from Products or a routine editor. A scan opens a product detail without implying ownership. "Je l'ai" explicitly adds the product to the personal collection, while adding it to a routine also marks it as owned. Keep the shared catalogue, the local product cache, and the user's collection conceptually distinct.
+- **Consequences:** Product persistence must separate cached identity data from personal ownership. SQLite schema version 7 represents ownership with one `product_collection` row per cached product, backfills every existing product during migration, and removes only that relation when ownership ends. Cached product data and routine or history references remain intact. The scanner needs an origin context and a stable result route. A future catalogue view and "Je le veux" state can reuse the same product detail without adding a Scan tab.
+
+### 2026-07-14 - One routine per period with scheduled product or category steps
+
+- **Status:** accepted
+- **Context:** Multiple overlapping routines would make Today harder to understand, while requiring every product up front would block people who have not yet catalogued their bathroom products.
+- **Decision:** Allow one active morning routine and one active evening routine. Plan usage per step: every day, selected weekdays, or temporarily disabled. Each step contains either one specific product or a completable placeholder from the controlled product-category taxonomy. Keep the fixed routine names, allow an optional short instruction, suggest category-based ordering, and allow manual reordering. Changes affect future occurrences only and preserve past snapshots.
+- **Consequences:** The routine model needs dated revisions or equivalent snapshots, per-step scheduling, skipped states, and nullable product links with a required category. Removing an owned product converts future linked steps to placeholders after confirmation without changing history. Quantity, wait time, complex cycles, and multiple alternative products per step remain deferred.
+
+### 2026-07-14 - Immutable routine revisions for local history
+
+- **Status:** accepted
+- **Context:** A mutable routine definition would make a past date appear with products, categories, or a schedule that did not apply at the time. This would also misrepresent days when the application was not opened.
+- **Decision:** Store a complete, dated revision of a routine's steps whenever its future definition changes. A local-date query selects the most recent revision effective on that date, then reads its per-step completed or skipped status. The first migration creates a historical revision for every existing routine and copies legacy completion rows into the new status table.
+- **Consequences:** Absence of a status remains « non renseignée ». Product links, placeholder labels, instructions, positions, activation and selected weekdays are all historical. The legacy tables stay in SQLite solely to migrate existing installations; new writes use revisions and daily statuses. Future edits must choose an effective local date and cannot mutate an effective revision. A pending revision for the same future local date may be replaced atomically before it takes effect so repeated edits do not create a uniqueness conflict; the transaction preserves the previous pending revision if saving fails.
+
+### 2026-07-14 - Routine history uses four neutral day states
+
+- **Status:** accepted
+- **Context:** A useful journal must distinguish deliberate skipping from missing information without turning incomplete tracking into a failure signal.
+- **Decision:** Derive four calendar states: completed, partially completed, deliberately skipped, and not recorded. Provide a complete read-only calendar history after the daily routine loop, with retroactive editing deferred. Open the routine relevant to the current moment on Today and keep the other period accessible on the same screen. Allow an optional fixed-time reminder per routine.
+- **Consequences:** Daily execution must store completed and skipped events while treating absence as unknown. Calendar presentation cannot rely on color alone or use guilt-based language. Historical queries must read the routine definition that applied on the selected date.
+
 ### 2026-07-14 - Evidence-linked scanner highlights
 
 - **Status:** accepted
@@ -134,10 +183,10 @@ Record only decisions that should guide future work.
 
 ### 2026-07-12 - Product catalogue before routine linking
 
-- **Status:** accepted
+- **Status:** superseded
 - **Context:** A routine needs a reusable list of products, while adding products must stay fast enough for first use.
 - **Decision:** Store owned products locally in a dedicated SQLite catalogue. Scan EAN/UPC and QR-compatible codes with the device camera, look up basic fields through Open Beauty Facts, require confirmation, and fall back to manual entry. A saved product may then be added as an optional routine step; free-text routine steps remain supported.
-- **Consequences:** The catalogue is the source of truth for products, while a routine keeps a product reference and a readable title snapshot. External lookup data is not treated as authoritative and is never shown without user confirmation; no ingredient analysis or score is included in this slice.
+- **Consequences:** Superseded by the 2026-07-14 collection/scan and scheduled-step decisions. Product identity, local cache, personal ownership, and category placeholders are now distinct concepts.
 
 ### 2026-07-12 - Local-first routine persistence
 
@@ -155,10 +204,10 @@ Record only decisions that should guide future work.
 
 ### 2026-07-12 - Empty first-run onboarding
 
-- **Status:** accepted
+- **Status:** superseded
 - **Context:** First-time users should begin with their own routine rather than sample skincare data.
 - **Decision:** Start with an empty state and guide the user to create one morning or evening routine with free-text steps. Linking a step to a product is deferred.
-- **Consequences:** The first useful loop is available without a product catalogue; routine editing and product linking become the next feature slices.
+- **Consequences:** Superseded by the 2026-07-14 scheduled-step decision. The current free-text onboarding remains migration input, while the target editor uses controlled category placeholders that can later be linked to products.
 
 ### 2026-07-12 - Single light appearance
 

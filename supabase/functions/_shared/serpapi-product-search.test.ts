@@ -1,6 +1,7 @@
 import {
   candidatesFromSerpApiImages,
   retailerIdentityHintsFromSerpApiImages,
+  searchSerpApiProductImages,
   serpApiGoogleImagesUrl,
 } from './serpapi-product-search';
 import type { ApprovedDomain } from './visual-lookup';
@@ -25,6 +26,42 @@ describe('SerpApi product image search', () => {
     expect(url.searchParams.get('engine')).toBe('google_images');
     expect(url.searchParams.get('q')).toContain('acide glycolique');
     expect(url.searchParams.get('safe')).toBe('active');
+  });
+
+  it('scopes a known brand query to its approved manufacturer domains', () => {
+    const url = serpApiGoogleImagesUrl(
+      'secret',
+      'AROMA-ZONE Sérum Rétinal Optimisé',
+      ['aroma-zone.com', 'www.aroma-zone.com', 'not a domain'],
+    );
+
+    expect(url.searchParams.get('q')).toBe(
+      'AROMA-ZONE Sérum Rétinal Optimisé (site:aroma-zone.com)',
+    );
+  });
+
+  it('uses the approved manufacturer scope for the provider request', async () => {
+    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({
+      json: async () => ({ images_results: [] }),
+      ok: true,
+    } as Response);
+
+    try {
+      await searchSerpApiProductImages(
+        'secret',
+        'AROMA-ZONE Sérum Rétinal Optimisé',
+        approved,
+        [],
+        'AROMA-ZONE',
+      );
+
+      const requestUrl = new URL(String(fetchMock.mock.calls[0]?.[0]));
+      expect(requestUrl.searchParams.get('q')).toBe(
+        'AROMA-ZONE Sérum Rétinal Optimisé (site:aroma-zone.com)',
+      );
+    } finally {
+      fetchMock.mockRestore();
+    }
   });
 
   it('accepts an exact product only when page and image are official', () => {

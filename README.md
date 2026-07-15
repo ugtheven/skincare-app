@@ -41,6 +41,7 @@ npm run check
 ## Project context
 
 - Product scope: `docs/PRODUCT.md`
+- Routines and catalogue roadmap: `docs/ROUTINES_CATALOG_ROADMAP.md`
 - Development workflow: `docs/WORKFLOW.md`
 - Durable decisions: `docs/DECISIONS.md`
 - Codex instructions: `AGENTS.md`

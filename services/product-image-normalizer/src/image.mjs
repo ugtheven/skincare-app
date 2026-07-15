@@ -37,8 +37,8 @@ export async function assertCommercialPackshot(source) {
     }
     const channels = [red / pixels, green / pixels, blue / pixels];
     return (
-      Math.min(...channels) >= 225 &&
-      Math.max(...channels) - Math.min(...channels) <= 18
+      Math.min(...channels) >= 210 &&
+      Math.max(...channels) - Math.min(...channels) <= 40
     );
   }).length;
   if (lightNeutralCorners < 3) throw new Error('non_commercial_background');

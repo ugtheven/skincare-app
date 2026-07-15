@@ -1,4 +1,8 @@
-import type { Product, ProductDraft } from '@/domain/product';
+import {
+  emptyProductDraft,
+  type Product,
+  type ProductDraft,
+} from '@/domain/product';
 import type { ProductCandidate } from '@/domain/product-recognition';
 
 import {
@@ -6,6 +10,7 @@ import {
   mergeBarcodeEnrichment,
   recognizeProductBarcode,
   recognizeProductPhoto,
+  searchProductsByText,
   type BarcodeRecognitionDependencies,
   type PhotoRecognitionDependencies,
 } from './product-recognition-service';
@@ -178,7 +183,83 @@ describe('recognizeProductPhoto', () => {
   });
 });
 
+describe('searchProductsByText', () => {
+  const localCandidate: ProductCandidate = {
+    ...publicCandidate,
+    id: 'local-aroma-zone',
+    source: 'local',
+  };
+
+  it('stops after a reliable local cache result', async () => {
+    const searchShared = jest.fn();
+    const searchPublic = jest.fn();
+
+    const result = await searchProductsByText(
+      'AROMA-ZONE Sérum acide glycolique 10%',
+      {
+        searchLocal: jest.fn().mockResolvedValue([localCandidate]),
+        searchShared,
+        searchPublic,
+      },
+    );
+
+    expect(result).toMatchObject({
+      kind: 'results',
+      candidates: [expect.objectContaining({ id: 'local-aroma-zone' })],
+      isPartial: false,
+    });
+    expect(searchShared).not.toHaveBeenCalled();
+    expect(searchPublic).not.toHaveBeenCalled();
+  });
+
+  it('combines shared and free public results after a local miss', async () => {
+    const result = await searchProductsByText(
+      'AROMA-ZONE Sérum acide glycolique 10%',
+      {
+        searchLocal: jest.fn().mockResolvedValue([]),
+        searchShared: jest.fn().mockResolvedValue([publicCandidate]),
+        searchPublic: jest.fn().mockResolvedValue([]),
+      },
+    );
+
+    expect(result).toMatchObject({
+      kind: 'results',
+      candidates: [expect.objectContaining({ id: 'public-aroma-zone' })],
+      isPartial: false,
+    });
+  });
+
+  it('reports partial results without hiding an unavailable source', async () => {
+    await expect(
+      searchProductsByText('AROMA-ZONE Sérum acide glycolique 10%', {
+        searchLocal: jest.fn().mockResolvedValue([]),
+        searchShared: jest.fn().mockRejectedValue(new Error('offline')),
+        searchPublic: jest.fn().mockResolvedValue([publicCandidate]),
+      }),
+    ).resolves.toMatchObject({ kind: 'results', isPartial: true });
+  });
+
+  it('distinguishes no result from complete lookup unavailability', async () => {
+    await expect(
+      searchProductsByText('Produit Exemple', {
+        searchLocal: jest.fn().mockResolvedValue([]),
+        searchShared: jest.fn().mockResolvedValue([]),
+        searchPublic: jest.fn().mockResolvedValue([]),
+      }),
+    ).resolves.toEqual({ kind: 'not_found', isPartial: false });
+
+    await expect(
+      searchProductsByText('Produit Exemple', {
+        searchLocal: jest.fn().mockRejectedValue(new Error('sqlite')),
+        searchShared: jest.fn().mockRejectedValue(new Error('offline')),
+        searchPublic: jest.fn().mockRejectedValue(new Error('offline')),
+      }),
+    ).resolves.toEqual({ kind: 'unavailable' });
+  });
+});
+
 const barcodeDraft: ProductDraft = {
+  ...emptyProductDraft,
   name: 'Foaming Facial Cleanser',
   brand: 'CeraVe',
   category: 'Nettoyant',
@@ -201,6 +282,16 @@ const localProduct: Product = {
   category: barcodeDraft.category,
   barcode: barcodeDraft.barcode,
   imageUrl: null,
+  usageText: null,
+  usageSource: null,
+  usageSourceUrl: null,
+  precautionsText: null,
+  precautionsSource: null,
+  precautionsSourceUrl: null,
+  informationConfidence: null,
+  confidenceSource: null,
+  confidenceSourceUrl: null,
+  confidenceNote: null,
   createdAt: '2026-07-12T12:00:00.000Z',
   updatedAt: '2026-07-12T12:00:00.000Z',
 };
@@ -348,6 +439,15 @@ describe('barcode enrichment', () => {
       ingredientsText: 'Aqua, Glycerin, Ceramide NP',
       ingredientsSource: 'CeraVe',
       ingredientsSourceUrl: 'https://example.com/cerave',
+      usageText: 'Appliquer matin et soir.',
+      usageSource: 'CeraVe',
+      usageSourceUrl: 'https://example.com/cerave',
+      precautionsText: 'Éviter le contact direct avec les yeux.',
+      precautionsSource: 'CeraVe',
+      precautionsSourceUrl: 'https://example.com/cerave',
+      informationConfidence: 'high' as const,
+      confidenceSource: 'Catalogue partagé',
+      confidenceNote: 'Identité vérifiée.',
     };
 
     expect(mergeBarcodeEnrichment(current, enriched)).toMatchObject({
@@ -355,6 +455,26 @@ describe('barcode enrichment', () => {
       category: 'Hydratant',
       imageUrl: 'https://example.com/cerave.webp',
       ingredientsText: 'Aqua, Glycerin, Ceramide NP',
+      usageText: 'Appliquer matin et soir.',
+      precautionsSource: 'CeraVe',
+      informationConfidence: 'high',
+    });
+  });
+
+  it('does not replace sourced details with unsourced enrichment text', () => {
+    const current = {
+      ...barcodeDraft,
+      usageText: 'Usage existant.',
+      usageSource: 'Fabricant',
+    };
+    const enriched = {
+      ...barcodeDraft,
+      usageText: 'Texte sans source',
+    };
+
+    expect(mergeBarcodeEnrichment(current, enriched)).toMatchObject({
+      usageText: 'Usage existant.',
+      usageSource: 'Fabricant',
     });
   });
 
