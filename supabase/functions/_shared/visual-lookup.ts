@@ -39,6 +39,21 @@ export type VisualWebCandidate = {
   score: number;
 };
 
+export type StoredProductDiscovery = {
+  fingerprint: string;
+  proposedName: string;
+  proposedBrand: string | null;
+  sourcePageUrl: string | null;
+  normalizedImageUrl: string | null;
+  status: 'pending' | 'accepted' | 'rejected';
+  productImage: {
+    sourceDomain: string;
+    sourceKind: 'manufacturer' | 'licensed_catalogue';
+    license: string | null;
+    licenseUrl: string | null;
+  } | null;
+};
+
 export function normalizeWebText(value: string) {
   return value
     .normalize('NFKD')
@@ -220,6 +235,68 @@ export function matchingApprovedDomain(
         host.endsWith(`.${domain.toLocaleLowerCase('en-US')}`),
     ) ?? null
   );
+}
+
+export function candidatesFromStoredDiscoveries(
+  discoveries: StoredProductDiscovery[],
+  query: string,
+  approvedDomains: ApprovedDomain[],
+): VisualWebCandidate[] {
+  return discoveries
+    .flatMap((discovery) => {
+      if (
+        discovery.status === 'rejected' ||
+        !discovery.proposedBrand ||
+        !discovery.sourcePageUrl ||
+        !discovery.normalizedImageUrl ||
+        !discovery.productImage
+      ) {
+        return [];
+      }
+      const pageSource = matchingApprovedDomain(
+        discovery.sourcePageUrl,
+        approvedDomains,
+      );
+      const imageSource = approvedDomains.find(
+        ({ brand, domain, source_kind }) =>
+          source_kind === discovery.productImage?.sourceKind &&
+          normalizeWebText(brand) ===
+            normalizeWebText(discovery.proposedBrand ?? '') &&
+          domain.toLocaleLowerCase('en-US') ===
+            discovery.productImage?.sourceDomain.toLocaleLowerCase('en-US'),
+      );
+      if (
+        !pageSource ||
+        !imageSource ||
+        normalizeWebText(pageSource.brand) !==
+          normalizeWebText(discovery.proposedBrand)
+      ) {
+        return [];
+      }
+      const overlap = visualProductIdentityOverlap(
+        query,
+        discovery.proposedName,
+        discovery.proposedBrand,
+      );
+      if (overlap <= 0) return [];
+      return [
+        {
+          id: discovery.fingerprint,
+          name: discovery.proposedName,
+          brand: discovery.proposedBrand,
+          category: null,
+          imageUrl: discovery.normalizedImageUrl,
+          sourceUrl: discovery.sourcePageUrl,
+          sourceDomain: imageSource.domain,
+          sourceKind: imageSource.source_kind,
+          sourceLicense: discovery.productImage.license,
+          sourceLicenseUrl: discovery.productImage.licenseUrl,
+          score: Number(Math.max(0.78, overlap * 0.92).toFixed(3)),
+        },
+      ];
+    })
+    .sort((left, right) => right.score - left.score)
+    .slice(0, 3);
 }
 
 export function retailerIdentityHintsFromWebDetection(

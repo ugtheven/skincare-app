@@ -27,6 +27,21 @@ type ProductRow = {
   brand: string | null;
   category: string | null;
   image_url: string | null;
+  confidence: number;
+  usage_text?: string | null;
+  usage_source?: string | null;
+  usage_source_url?: string | null;
+  precautions_text?: string | null;
+  precautions_source?: string | null;
+  precautions_source_url?: string | null;
+  confidence_source?: string | null;
+  confidence_source_url?: string | null;
+  confidence_note?: string | null;
+  product_sources?: {
+    provider: string;
+    source_url: string | null;
+    fetched_at: string;
+  }[];
   product_aliases?: { alias: string }[];
   product_formulas?: {
     ingredients_text: string;
@@ -36,6 +51,13 @@ type ProductRow = {
     status: string;
   }[];
 };
+
+function informationConfidence(score: number) {
+  if (score >= 80) return 'high' as const;
+  if (score >= 60) return 'moderate' as const;
+  if (score > 0) return 'limited' as const;
+  return null;
+}
 
 const corsHeaders = {
   'Access-Control-Allow-Headers':
@@ -160,6 +182,12 @@ function scoreTextMatch(value: string, product: ProductRow) {
       ...(product.product_aliases ?? []).map(({ alias }) => alias),
     ].map((name) => {
       if (!criticalProductVariantsMatch(value, name)) return 0;
+      if (
+        product.brand &&
+        normalizeText(value) === normalizeText(product.brand)
+      ) {
+        return 0.55;
+      }
       const candidate = [product.brand, name].filter(Boolean).join(' ');
       const candidateTokens = textTokens(candidate);
       if (!candidateTokens.length) return 0;
@@ -197,6 +225,10 @@ function toResponse(
   const formula = (product.product_formulas ?? [])
     .filter(({ status }) => status === 'approved')
     .sort((left, right) => right.confidence - left.confidence)[0];
+  const primarySource = (product.product_sources ?? []).sort((left, right) =>
+    right.fetched_at.localeCompare(left.fetched_at),
+  )[0];
+  const confidenceLevel = informationConfidence(product.confidence);
   return {
     id: product.id,
     name: product.canonical_name,
@@ -213,6 +245,20 @@ function toResponse(
     ingredientsText: formula?.ingredients_text ?? null,
     ingredientsSource: formula?.source_provider ?? null,
     ingredientsSourceUrl: formula?.source_url ?? null,
+    usageText: product.usage_text ?? null,
+    usageSource: product.usage_source ?? null,
+    usageSourceUrl: product.usage_source_url ?? null,
+    precautionsText: product.precautions_text ?? null,
+    precautionsSource: product.precautions_source ?? null,
+    precautionsSourceUrl: product.precautions_source_url ?? null,
+    informationConfidence: confidenceLevel,
+    confidenceSource: confidenceLevel
+      ? (product.confidence_source ?? primarySource?.provider ?? null)
+      : null,
+    confidenceSourceUrl: confidenceLevel
+      ? (product.confidence_source_url ?? primarySource?.source_url ?? null)
+      : null,
+    confidenceNote: confidenceLevel ? (product.confidence_note ?? null) : null,
     ...(score === undefined ? {} : { score }),
   };
 }
@@ -280,7 +326,7 @@ Deno.serve(async (request) => {
       (term) => `normalized_alias.ilike.%${term}%`,
     );
     const productSelection =
-      'id, canonical_name, brand, category, image_url, product_aliases(alias), product_formulas(ingredients_text, source_provider, source_url, confidence, status)';
+      'id, canonical_name, brand, category, image_url, confidence, usage_text, usage_source, usage_source_url, precautions_text, precautions_source, precautions_source_url, confidence_source, confidence_source_url, confidence_note, product_sources(provider, source_url, fetched_at), product_aliases(alias), product_formulas(ingredients_text, source_provider, source_url, confidence, status)';
     const [productResult, aliasResult] = await Promise.all([
       admin
         .from('products')
@@ -331,7 +377,7 @@ Deno.serve(async (request) => {
   const { data: identifier, error: identifierError } = await admin
     .from('product_identifiers')
     .select(
-      'product:products(id, canonical_name, brand, category, image_url, product_formulas(ingredients_text, source_provider, source_url, confidence, status))',
+      'product:products(id, canonical_name, brand, category, image_url, confidence, usage_text, usage_source, usage_source_url, precautions_text, precautions_source, precautions_source_url, confidence_source, confidence_source_url, confidence_note, product_sources(provider, source_url, fetched_at), product_formulas(ingredients_text, source_provider, source_url, confidence, status))',
     )
     .eq('normalized_value', query)
     .maybeSingle();
@@ -428,7 +474,9 @@ Deno.serve(async (request) => {
     : '';
   const identityQuery = admin
     .from('products')
-    .select('id, canonical_name, brand, category, image_url')
+    .select(
+      'id, canonical_name, brand, category, image_url, confidence, usage_text, usage_source, usage_source_url, precautions_text, precautions_source, precautions_source_url, confidence_source, confidence_source_url, confidence_note',
+    )
     .eq('normalized_name', normalizedName);
   const { data: existingIdentity } = await (
     normalizedBrand
@@ -451,7 +499,9 @@ Deno.serve(async (request) => {
           image_url: null,
           confidence: 70,
         })
-        .select('id, canonical_name, brand, category, image_url')
+        .select(
+          'id, canonical_name, brand, category, image_url, confidence, usage_text, usage_source, usage_source_url, precautions_text, precautions_source, precautions_source_url, confidence_source, confidence_source_url, confidence_note',
+        )
         .single();
   const product = productResult.data;
   if (productResult.error || !product) {
@@ -462,6 +512,7 @@ Deno.serve(async (request) => {
   }
   const responseProduct: ProductRow = {
     ...product,
+    product_sources: [],
     product_formulas: [],
   };
 
@@ -481,6 +532,13 @@ Deno.serve(async (request) => {
     },
     { onConflict: 'provider,provider_product_id' },
   );
+  responseProduct.product_sources = [
+    {
+      provider: `open_${payload.product.product_type ?? 'beauty'}_facts`,
+      source_url: `https://world.openfoodfacts.org/product/${query}`,
+      fetched_at: new Date().toISOString(),
+    },
+  ];
   const ingredientsText =
     payload.product.ingredients_text_fr?.trim() ||
     payload.product.ingredients_text?.trim() ||

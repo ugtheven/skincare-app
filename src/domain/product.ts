@@ -1,5 +1,7 @@
 export type ProductSource = 'manual' | 'barcode';
 
+export type ProductInformationConfidence = 'limited' | 'moderate' | 'high';
+
 export const PRODUCT_CATEGORIES = [
   'Nettoyant',
   'Démaquillant',
@@ -34,6 +36,16 @@ export type Product = {
   ingredientsText: string | null;
   ingredientsSource: string | null;
   ingredientsSourceUrl: string | null;
+  usageText: string | null;
+  usageSource: string | null;
+  usageSourceUrl: string | null;
+  precautionsText: string | null;
+  precautionsSource: string | null;
+  precautionsSourceUrl: string | null;
+  informationConfidence: ProductInformationConfidence | null;
+  confidenceSource: string | null;
+  confidenceSourceUrl: string | null;
+  confidenceNote: string | null;
   source: ProductSource;
   createdAt: string;
   updatedAt: string;
@@ -52,6 +64,16 @@ export type ProductDraft = {
   ingredientsText: string;
   ingredientsSource: string;
   ingredientsSourceUrl: string;
+  usageText: string;
+  usageSource: string;
+  usageSourceUrl: string;
+  precautionsText: string;
+  precautionsSource: string;
+  precautionsSourceUrl: string;
+  informationConfidence: ProductInformationConfidence | '';
+  confidenceSource: string;
+  confidenceSourceUrl: string;
+  confidenceNote: string;
   source: ProductSource;
 };
 
@@ -68,5 +90,15 @@ export const emptyProductDraft: ProductDraft = {
   ingredientsText: '',
   ingredientsSource: '',
   ingredientsSourceUrl: '',
+  usageText: '',
+  usageSource: '',
+  usageSourceUrl: '',
+  precautionsText: '',
+  precautionsSource: '',
+  precautionsSourceUrl: '',
+  informationConfidence: '',
+  confidenceSource: '',
+  confidenceSourceUrl: '',
+  confidenceNote: '',
   source: 'manual',
 };

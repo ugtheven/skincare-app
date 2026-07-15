@@ -25,6 +25,7 @@ import {
 } from '../_shared/serpapi-product-search.ts';
 import {
   type ApprovedDomain,
+  candidatesFromStoredDiscoveries,
   candidatesFromWebDetection,
   criticalProductVariantsMatch,
   type DiscoveryDomain,
@@ -50,6 +51,13 @@ function response(body: unknown, status = 200) {
 
 function compactText(value: string) {
   return normalizeWebText(value).replace(/\s+/g, '');
+}
+
+function informationConfidence(score: number) {
+  if (score >= 80) return 'high' as const;
+  if (score >= 60) return 'moderate' as const;
+  if (score > 0) return 'limited' as const;
+  return null;
 }
 
 function safeHostname(value: string | undefined) {
@@ -268,6 +276,61 @@ Deno.serve(async (request) => {
       source_kind === 'manufacturer' &&
       normalizeWebText(recognizedText).includes(normalizeWebText(brand)),
   );
+
+  const { data: storedDiscoveryRows } = await admin
+    .from('product_discoveries')
+    .select(
+      'fingerprint, proposed_name, proposed_brand, source_page_url, normalized_image_url, status, product_images(source_domain, source_kind, license, license_url)',
+    )
+    .neq('status', 'rejected')
+    .not('normalized_image_url', 'is', null)
+    .order('last_seen_at', { ascending: false })
+    .limit(30);
+  const storedDiscoveryCandidates = candidatesFromStoredDiscoveries(
+    (storedDiscoveryRows ?? []).map((discovery) => {
+      const productImage = Array.isArray(discovery.product_images)
+        ? discovery.product_images[0]
+        : discovery.product_images;
+      return {
+        fingerprint: discovery.fingerprint,
+        proposedName: discovery.proposed_name,
+        proposedBrand: discovery.proposed_brand,
+        sourcePageUrl: discovery.source_page_url,
+        normalizedImageUrl: discovery.normalized_image_url,
+        status: discovery.status,
+        productImage: productImage
+          ? {
+              sourceDomain: productImage.source_domain,
+              sourceKind: productImage.source_kind,
+              license: productImage.license,
+              licenseUrl: productImage.license_url,
+            }
+          : null,
+      };
+    }),
+    recognizedText,
+    approvedDomains,
+  );
+  if (storedDiscoveryCandidates.length) {
+    return response({
+      matches: storedDiscoveryCandidates.map((candidate) => ({
+        ...candidate,
+        imageSource: candidate.brand,
+        imageSourceUrl: candidate.sourceUrl,
+        imageLicense: candidate.sourceLicense,
+        imageLicenseUrl: candidate.sourceLicenseUrl,
+        matchSource: 'google',
+      })),
+      meta: {
+        googleCandidateCount: 0,
+        normalizedGoogleCandidateCount: 0,
+        serpApiCandidateCount: 0,
+        normalizedSerpApiCandidateCount: 0,
+        serpApiStatus: 'not_needed',
+        catalogueCandidateCount: 0,
+      },
+    });
+  }
 
   if (recognizedOcrBrand) {
     const manufacturerPage = await discoverManufacturerPage(
@@ -539,7 +602,7 @@ Deno.serve(async (request) => {
     const { data } = await admin
       .from('products')
       .select(
-        'id, canonical_name, brand, category, image_url, product_aliases(alias), product_formulas(ingredients_text, source_provider, source_url, language, confidence, status)',
+        'id, canonical_name, brand, category, image_url, confidence, usage_text, usage_source, usage_source_url, precautions_text, precautions_source, precautions_source_url, confidence_source, confidence_source_url, confidence_note, product_sources(provider, source_url, fetched_at), product_aliases(alias), product_formulas(ingredients_text, source_provider, source_url, language, confidence, status)',
       )
       .or(filters.join(','))
       .limit(30);
@@ -559,6 +622,11 @@ Deno.serve(async (request) => {
               (left: { confidence: number }, right: { confidence: number }) =>
                 right.confidence - left.confidence,
             )[0];
+          const primarySource = (product.product_sources ?? []).sort(
+            (left: { fetched_at: string }, right: { fetched_at: string }) =>
+              right.fetched_at.localeCompare(left.fetched_at),
+          )[0];
+          const confidenceLevel = informationConfidence(product.confidence);
           return {
             id: product.id,
             name: product.canonical_name,
@@ -577,6 +645,24 @@ Deno.serve(async (request) => {
             ingredientsText: formula?.ingredients_text ?? null,
             ingredientsSource: formula?.source_provider ?? null,
             ingredientsSourceUrl: formula?.source_url ?? null,
+            usageText: product.usage_text ?? null,
+            usageSource: product.usage_source ?? null,
+            usageSourceUrl: product.usage_source_url ?? null,
+            precautionsText: product.precautions_text ?? null,
+            precautionsSource: product.precautions_source ?? null,
+            precautionsSourceUrl: product.precautions_source_url ?? null,
+            informationConfidence: confidenceLevel,
+            confidenceSource: confidenceLevel
+              ? (product.confidence_source ?? primarySource?.provider ?? null)
+              : null,
+            confidenceSourceUrl: confidenceLevel
+              ? (product.confidence_source_url ??
+                primarySource?.source_url ??
+                null)
+              : null,
+            confidenceNote: confidenceLevel
+              ? (product.confidence_note ?? null)
+              : null,
             matchSource: 'catalogue',
           };
         }),
@@ -597,15 +683,36 @@ Deno.serve(async (request) => {
     })
     .slice(0, 3);
 
-  if (serpApiStatus === 'unavailable' && !normalizedGoogleCandidates.length) {
-    return response({ error: 'provider_unavailable' }, 503);
+  if (
+    serpApiStatus === 'unavailable' &&
+    !normalizedGoogleCandidates.length &&
+    !matches.length
+  ) {
+    return response(
+      {
+        error: 'provider_unavailable',
+        ...(diagnosticsEnabled
+          ? { providerDiagnostics: { googleProviderError, serpApiError } }
+          : {}),
+      },
+      503,
+    );
   }
   if (
     googleProviderError &&
     serpApiStatus === 'not_configured' &&
-    !normalizedGoogleCandidates.length
+    !normalizedGoogleCandidates.length &&
+    !matches.length
   ) {
-    return response({ error: googleProviderError }, 503);
+    return response(
+      {
+        error: googleProviderError,
+        ...(diagnosticsEnabled
+          ? { providerDiagnostics: { googleProviderError, serpApiError } }
+          : {}),
+      },
+      503,
+    );
   }
 
   return response({
@@ -630,6 +737,16 @@ Deno.serve(async (request) => {
                 .filter(Boolean)
                 .slice(0, 10),
               serpApiError,
+              serpApiCandidates: serpApiCandidates
+                .slice(0, 3)
+                .map((candidate) => ({
+                  imageDomain: safeHostname(candidate.imageUrl ?? undefined),
+                  imageUrl: candidate.imageUrl?.slice(0, 500) ?? null,
+                  name: candidate.name.slice(0, 160),
+                  pageDomain: safeHostname(candidate.sourceUrl),
+                  sourceUrl: candidate.sourceUrl.slice(0, 500),
+                  score: candidate.score,
+                })),
               pages: (detection.pagesWithMatchingImages ?? [])
                 .slice(0, 10)
                 .map((page) => ({

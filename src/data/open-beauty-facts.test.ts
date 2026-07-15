@@ -4,6 +4,7 @@ import {
   productCandidatesFromSearch,
   productDraftFromLookup,
 } from './open-beauty-facts';
+import { emptyProductDraft } from '@/domain/product';
 
 const originalFetch = global.fetch;
 
@@ -25,6 +26,7 @@ describe('productDraftFromLookup', () => {
         },
       }),
     ).toEqual({
+      ...emptyProductDraft,
       name: 'Crème hydratante',
       brand: 'Laboratoire Exemple',
       category: 'Hydratant',
@@ -99,9 +101,24 @@ describe('productDraftFromLookup', () => {
         name: 'Foaming Facial Cleanser',
         brand: 'CeraVe',
         category: 'Nettoyant',
+        informationConfidence: 'limited',
+        confidenceSource: 'Open Beauty Facts (ODbL 1.0)',
         source: 'open-beauty-facts',
       }),
     ]);
+  });
+
+  it('uses a stable sourced identity when a public result has no barcode', () => {
+    expect(
+      productCandidatesFromSearch({
+        products: [
+          {
+            product_name: 'Sérum apaisant',
+            brands: 'Marque Exemple',
+          },
+        ],
+      })[0].id,
+    ).toBe('open-beauty-facts:marque exemple serum apaisant');
   });
 });
 

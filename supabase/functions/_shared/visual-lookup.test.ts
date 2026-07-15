@@ -1,4 +1,5 @@
 import {
+  candidatesFromStoredDiscoveries,
   candidatesFromWebDetection,
   criticalProductVariantsMatch,
   matchingApprovedDomain,
@@ -97,6 +98,61 @@ describe('visual lookup source policy', () => {
         brand: 'Example Brand',
         imageUrl: 'https://media.example-brand.com/serum.png',
         score: 0.81,
+      }),
+    ]);
+  });
+
+  it('reuses a verified pending discovery before another provider lookup', () => {
+    expect(
+      candidatesFromStoredDiscoveries(
+        [
+          {
+            fingerprint: 'serpapi-images:retinal',
+            proposedName: 'Sérum Rétinal Optimisé',
+            proposedBrand: 'AROMA-ZONE',
+            sourcePageUrl:
+              'https://www.aroma-zone.com/info/fiche-technique/serum-concentre-retinol-optimise',
+            normalizedImageUrl: 'https://catalogue.example.test/retinal.webp',
+            status: 'pending',
+            productImage: {
+              sourceDomain: 'aroma-zone.com',
+              sourceKind: 'manufacturer',
+              license: null,
+              licenseUrl: null,
+            },
+          },
+          {
+            fingerprint: 'serpapi-images:glycolic',
+            proposedName: 'Sérum Acide glycolique 10% & AHA',
+            proposedBrand: 'AROMA-ZONE',
+            sourcePageUrl: 'https://www.aroma-zone.com/glycolic',
+            normalizedImageUrl: 'https://catalogue.example.test/glycolic.webp',
+            status: 'pending',
+            productImage: {
+              sourceDomain: 'aroma-zone.com',
+              sourceKind: 'manufacturer',
+              license: null,
+              licenseUrl: null,
+            },
+          },
+        ],
+        'AROMA-ZONE Sérum Rétinal Optimisé',
+        [
+          ...approved,
+          {
+            domain: 'aroma-zone.com',
+            brand: 'AROMA-ZONE',
+            source_kind: 'manufacturer',
+            license: null,
+            license_url: null,
+          },
+        ],
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        id: 'serpapi-images:retinal',
+        name: 'Sérum Rétinal Optimisé',
+        imageUrl: 'https://catalogue.example.test/retinal.webp',
       }),
     ]);
   });

@@ -1,13 +1,22 @@
-import type { Product, ProductDraft, ProductSource } from '@/domain/product';
+import type {
+  Product,
+  ProductDraft,
+  ProductInformationConfidence,
+  ProductSource,
+} from '@/domain/product';
 import { parseIngredientList } from '@/domain/product-ingredients';
 import {
   identifierKindFor,
   normalizeProductIdentifier,
 } from '@/domain/product-identifier';
-import { selectProductCandidates } from '@/domain/product-recognition';
+import { selectTextSearchCandidates } from '@/domain/product-recognition';
 
 import type { ProductRepository } from './product-repository';
-import { openSkincareDatabase } from './sqlite-routine-repository';
+import {
+  openSkincareDatabase,
+  replaceProductUsagesWithPlaceholders,
+} from './sqlite-routine-repository';
+import { nextLocalDate } from '@/domain/routine';
 
 type ProductRow = {
   id: string;
@@ -23,6 +32,16 @@ type ProductRow = {
   ingredients_text: string | null;
   ingredients_source: string | null;
   ingredients_source_url: string | null;
+  usage_text: string | null;
+  usage_source: string | null;
+  usage_source_url: string | null;
+  precautions_text: string | null;
+  precautions_source: string | null;
+  precautions_source_url: string | null;
+  information_confidence: ProductInformationConfidence | null;
+  confidence_source: string | null;
+  confidence_source_url: string | null;
+  confidence_note: string | null;
   source: ProductSource;
   created_at: string;
   updated_at: string;
@@ -41,6 +60,28 @@ function nullable(value: string) {
   return trimmed || null;
 }
 
+function sourcedText(text: string, source: string, sourceUrl: string) {
+  const normalizedText = nullable(text);
+  const normalizedSource = nullable(source);
+  if (!normalizedText || !normalizedSource) return null;
+  return {
+    text: normalizedText,
+    source: normalizedSource,
+    sourceUrl: nullable(sourceUrl),
+  };
+}
+
+function sourcedConfidence(draft: ProductDraft) {
+  const source = nullable(draft.confidenceSource);
+  if (!draft.informationConfidence || !source) return null;
+  return {
+    level: draft.informationConfidence,
+    source,
+    sourceUrl: nullable(draft.confidenceSourceUrl),
+    note: nullable(draft.confidenceNote),
+  };
+}
+
 function toProduct(row: ProductRow): Product {
   return {
     id: row.id,
@@ -56,6 +97,16 @@ function toProduct(row: ProductRow): Product {
     ingredientsText: row.ingredients_text,
     ingredientsSource: row.ingredients_source,
     ingredientsSourceUrl: row.ingredients_source_url,
+    usageText: row.usage_text,
+    usageSource: row.usage_source,
+    usageSourceUrl: row.usage_source_url,
+    precautionsText: row.precautions_text,
+    precautionsSource: row.precautions_source,
+    precautionsSourceUrl: row.precautions_source_url,
+    informationConfidence: row.information_confidence,
+    confidenceSource: row.confidence_source,
+    confidenceSourceUrl: row.confidence_source_url,
+    confidenceNote: row.confidence_note,
     source: row.source,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -96,13 +147,71 @@ export class SQLiteProductRepository implements ProductRepository {
     private readonly openDatabase: typeof openSkincareDatabase = openSkincareDatabase,
   ) {}
 
-  async listProducts(): Promise<Product[]> {
+  async listCachedProducts(): Promise<Product[]> {
     const db = await this.openDatabase();
     const rows = await db.getAllAsync<ProductRow>(
       'SELECT * FROM products ORDER BY created_at DESC',
     );
 
     return rows.map(toProduct);
+  }
+
+  async listOwnedProducts(): Promise<Product[]> {
+    const db = await this.openDatabase();
+    const rows = await db.getAllAsync<ProductRow>(
+      `SELECT products.* FROM products
+       JOIN product_collection ON product_collection.product_id = products.id
+       ORDER BY product_collection.added_at DESC`,
+    );
+
+    return rows.map(toProduct);
+  }
+
+  async markAsOwned(productId: string): Promise<void> {
+    const db = await this.openDatabase();
+    await db.runAsync(
+      `INSERT OR IGNORE INTO product_collection (product_id, added_at)
+       SELECT id, ? FROM products WHERE id = ?`,
+      nowIso(),
+      productId,
+    );
+  }
+
+  async removeFromCollection(productId: string): Promise<void> {
+    const db = await this.openDatabase();
+    await db.withTransactionAsync(async () => {
+      await replaceProductUsagesWithPlaceholders(
+        db,
+        productId,
+        nextLocalDate(new Date()),
+      );
+      await db.runAsync(
+        'DELETE FROM product_collection WHERE product_id = ?',
+        productId,
+      );
+    });
+  }
+
+  async isOwned(productId: string): Promise<boolean> {
+    const db = await this.openDatabase();
+    const row = await db.getFirstAsync<{ is_owned: number }>(
+      `SELECT EXISTS(
+         SELECT 1 FROM product_collection WHERE product_id = ?
+       ) AS is_owned`,
+      productId,
+    );
+
+    return Boolean(row?.is_owned);
+  }
+
+  async findById(productId: string): Promise<Product | null> {
+    const db = await this.openDatabase();
+    const row = await db.getFirstAsync<ProductRow>(
+      'SELECT * FROM products WHERE id = ? LIMIT 1',
+      productId,
+    );
+
+    return row ? toProduct(row) : null;
   }
 
   async findByBarcode(barcode: string): Promise<Product | null> {
@@ -139,10 +248,46 @@ export class SQLiteProductRepository implements ProductRepository {
     );
   }
 
+  async findBySourceReference(
+    provider: string,
+    externalId: string,
+  ): Promise<Product | null> {
+    const db = await this.openDatabase();
+    const row = await db.getFirstAsync<ProductRow>(
+      `SELECT products.* FROM products
+       JOIN product_source_references
+         ON product_source_references.product_id = products.id
+       WHERE product_source_references.provider = ?
+         AND product_source_references.external_id = ?
+       LIMIT 1`,
+      provider,
+      externalId,
+    );
+
+    return row ? toProduct(row) : null;
+  }
+
+  async addSourceReference(
+    productId: string,
+    provider: string,
+    externalId: string,
+  ): Promise<void> {
+    const db = await this.openDatabase();
+    await db.runAsync(
+      `INSERT OR IGNORE INTO product_source_references
+       (product_id, provider, external_id, created_at)
+       VALUES (?, ?, ?, ?)`,
+      productId,
+      provider,
+      externalId,
+      nowIso(),
+    );
+  }
+
   async searchByText(text: string): Promise<Product[]> {
-    const products = await this.listProducts();
+    const products = await this.listCachedProducts();
     const byId = new Map(products.map((product) => [product.id, product]));
-    return selectProductCandidates(
+    return selectTextSearchCandidates(
       text,
       products.map((product) => ({
         id: product.id,
@@ -162,6 +307,17 @@ export class SQLiteProductRepository implements ProductRepository {
     draft: ProductDraft,
   ): Promise<{ product: Product; created: boolean }> {
     const barcode = nullable(draft.barcode);
+    const usage = sourcedText(
+      draft.usageText,
+      draft.usageSource,
+      draft.usageSourceUrl,
+    );
+    const precautions = sourcedText(
+      draft.precautionsText,
+      draft.precautionsSource,
+      draft.precautionsSourceUrl,
+    );
+    const confidence = sourcedConfidence(draft);
     if (barcode) {
       const existing = await this.findByIdentifier(barcode);
       if (existing) {
@@ -181,6 +337,23 @@ export class SQLiteProductRepository implements ProductRepository {
           ingredientsText: nullable(draft.ingredientsText),
           ingredientsSource: nullable(draft.ingredientsSource),
           ingredientsSourceUrl: nullable(draft.ingredientsSourceUrl),
+          usageText: usage?.text ?? existing.usageText,
+          usageSource: usage?.source ?? existing.usageSource,
+          usageSourceUrl: usage ? usage.sourceUrl : existing.usageSourceUrl,
+          precautionsText: precautions?.text ?? existing.precautionsText,
+          precautionsSource: precautions?.source ?? existing.precautionsSource,
+          precautionsSourceUrl: precautions
+            ? precautions.sourceUrl
+            : existing.precautionsSourceUrl,
+          informationConfidence:
+            confidence?.level ?? existing.informationConfidence,
+          confidenceSource: confidence?.source ?? existing.confidenceSource,
+          confidenceSourceUrl: confidence
+            ? confidence.sourceUrl
+            : existing.confidenceSourceUrl,
+          confidenceNote: confidence
+            ? confidence.note
+            : existing.confidenceNote,
           source: draft.source,
           updatedAt,
         };
@@ -191,6 +364,10 @@ export class SQLiteProductRepository implements ProductRepository {
                  image_source = ?, image_source_url = ?, image_license = ?,
                  image_license_url = ?, ingredients_text = ?,
                  ingredients_source = ?, ingredients_source_url = ?,
+                 usage_text = ?, usage_source = ?, usage_source_url = ?,
+                 precautions_text = ?, precautions_source = ?,
+                 precautions_source_url = ?, information_confidence = ?,
+                 confidence_source = ?, confidence_source_url = ?, confidence_note = ?,
                  source = ?, updated_at = ?
              WHERE id = ?`,
             product.name,
@@ -205,6 +382,16 @@ export class SQLiteProductRepository implements ProductRepository {
             product.ingredientsText,
             product.ingredientsSource,
             product.ingredientsSourceUrl,
+            product.usageText,
+            product.usageSource,
+            product.usageSourceUrl,
+            product.precautionsText,
+            product.precautionsSource,
+            product.precautionsSourceUrl,
+            product.informationConfidence,
+            product.confidenceSource,
+            product.confidenceSourceUrl,
+            product.confidenceNote,
             product.source,
             product.updatedAt,
             product.id,
@@ -235,6 +422,16 @@ export class SQLiteProductRepository implements ProductRepository {
       ingredientsText: nullable(draft.ingredientsText),
       ingredientsSource: nullable(draft.ingredientsSource),
       ingredientsSourceUrl: nullable(draft.ingredientsSourceUrl),
+      usageText: usage?.text ?? null,
+      usageSource: usage?.source ?? null,
+      usageSourceUrl: usage?.sourceUrl ?? null,
+      precautionsText: precautions?.text ?? null,
+      precautionsSource: precautions?.source ?? null,
+      precautionsSourceUrl: precautions?.sourceUrl ?? null,
+      informationConfidence: confidence?.level ?? null,
+      confidenceSource: confidence?.source ?? null,
+      confidenceSourceUrl: confidence?.sourceUrl ?? null,
+      confidenceNote: confidence?.note ?? null,
       source: draft.source,
       createdAt,
       updatedAt: createdAt,
@@ -245,8 +442,12 @@ export class SQLiteProductRepository implements ProductRepository {
         `INSERT INTO products
        (id, name, brand, category, barcode, image_url, image_source,
         image_source_url, image_license, image_license_url, ingredients_text,
-        ingredients_source, ingredients_source_url, source, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ingredients_source, ingredients_source_url,
+        usage_text, usage_source, usage_source_url, precautions_text,
+        precautions_source, precautions_source_url, information_confidence,
+        confidence_source, confidence_source_url, confidence_note,
+        source, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         product.id,
         product.name,
         product.brand,
@@ -260,6 +461,16 @@ export class SQLiteProductRepository implements ProductRepository {
         product.ingredientsText,
         product.ingredientsSource,
         product.ingredientsSourceUrl,
+        product.usageText,
+        product.usageSource,
+        product.usageSourceUrl,
+        product.precautionsText,
+        product.precautionsSource,
+        product.precautionsSourceUrl,
+        product.informationConfidence,
+        product.confidenceSource,
+        product.confidenceSourceUrl,
+        product.confidenceNote,
         product.source,
         product.createdAt,
         product.updatedAt,

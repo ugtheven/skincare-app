@@ -103,6 +103,15 @@ describe('shared catalogue network lookup', () => {
             brand: 'CeraVe',
             category: null,
             imageUrl: null,
+            usageText: 'Nettoie la peau puis se rince.',
+            usageSource: 'CeraVe',
+            usageSourceUrl: 'https://example.com/cleanser',
+            precautionsText: 'Éviter le contact direct avec les yeux.',
+            precautionsSource: 'CeraVe',
+            precautionsSourceUrl: 'https://example.com/cleanser',
+            informationConfidence: 'high',
+            confidenceSource: 'Catalogue partagé',
+            confidenceNote: 'Identité vérifiée par code-barres.',
           },
         ],
       },
@@ -115,6 +124,10 @@ describe('shared catalogue network lookup', () => {
       name: 'Foaming Facial Cleanser',
       category: 'Nettoyant',
       barcode: '3606000537194',
+      usageText: 'Nettoie la peau puis se rince.',
+      precautionsSource: 'CeraVe',
+      informationConfidence: 'high',
+      confidenceSource: 'Catalogue partagé',
     });
     expect(mockInvoke).toHaveBeenCalledWith(
       'product-lookup',
@@ -123,6 +136,7 @@ describe('shared catalogue network lookup', () => {
         signal: expect.any(AbortSignal),
       }),
     );
+    expect(mockInvoke.mock.calls[0][1].body).not.toHaveProperty('isOwned');
   });
 
   it('returns null for a definitive shared catalogue miss', async () => {

@@ -1,6 +1,7 @@
 import {
   emptyProductDraft,
   PRODUCT_CATEGORIES,
+  type ProductInformationConfidence,
   type ProductDraft,
 } from './product';
 
@@ -17,6 +18,16 @@ export type ProductCandidate = {
   ingredientsText?: string | null;
   ingredientsSource?: string | null;
   ingredientsSourceUrl?: string | null;
+  usageText?: string | null;
+  usageSource?: string | null;
+  usageSourceUrl?: string | null;
+  precautionsText?: string | null;
+  precautionsSource?: string | null;
+  precautionsSourceUrl?: string | null;
+  informationConfidence?: ProductInformationConfidence | null;
+  confidenceSource?: string | null;
+  confidenceSourceUrl?: string | null;
+  confidenceNote?: string | null;
   score: number;
   source: 'local' | 'shared' | 'open-beauty-facts' | 'google-web';
 };
@@ -642,6 +653,94 @@ export function selectProductCandidates(
     .slice(0, limit);
 }
 
+function textSearchCandidateScore(
+  text: string,
+  candidate: ProductCandidate,
+): number {
+  if (!criticalProductVariantsMatch(text, candidate.name)) return 0;
+
+  const queryTokens = productTextTokens(text);
+  const candidateTokens = productTextTokens(
+    [candidate.brand, candidate.name].filter(Boolean).join(' '),
+  );
+  if (!queryTokens.length || !candidateTokens.length) return 0;
+
+  const tokenMatches = (left: string, right: string) =>
+    left === right ||
+    (left.length >= 4 &&
+      right.length >= 4 &&
+      (left.includes(right) || right.includes(left)));
+  const matches = queryTokens.filter((queryToken) =>
+    candidateTokens.some((candidateToken) =>
+      tokenMatches(queryToken, candidateToken),
+    ),
+  ).length;
+  const queryCoverage = matches / queryTokens.length;
+  if (queryCoverage < 0.6) return 0;
+
+  const normalizedQuery = normalizeProductText(text);
+  const normalizedName = normalizeProductText(candidate.name);
+  const normalizedBrand = normalizeProductText(candidate.brand ?? '');
+  if (normalizedQuery === normalizedName) return 0.94;
+  if (normalizedBrand && normalizedQuery === normalizedBrand) return 0.55;
+
+  const candidateCoverage = matches / candidateTokens.length;
+  const phraseBonus = normalizeProductText(
+    [candidate.brand, candidate.name].filter(Boolean).join(' '),
+  ).includes(normalizedQuery)
+    ? 0.12
+    : 0;
+  return Math.min(
+    1,
+    Number(
+      (queryCoverage * 0.66 + candidateCoverage * 0.18 + phraseBonus).toFixed(
+        3,
+      ),
+    ),
+  );
+}
+
+/** Ranking for deliberate typed search, where the brand or product name may
+ * be entered alone. Scanner ranking remains stricter about brand evidence. */
+export function selectTextSearchCandidates(
+  text: string,
+  candidates: ProductCandidate[],
+  limit = 8,
+): ProductCandidate[] {
+  const seen = new Set<string>();
+  const sourcePriority: Record<ProductCandidate['source'], number> = {
+    local: 0,
+    shared: 1,
+    'open-beauty-facts': 2,
+    'google-web': 3,
+  };
+
+  return candidates
+    .map((candidate) => {
+      const textScore = textSearchCandidateScore(text, candidate);
+      return {
+        ...candidate,
+        score: Math.max(textScore, Math.min(candidate.score, textScore + 0.08)),
+      };
+    })
+    .filter((candidate) => candidate.score >= 0.35)
+    .sort(
+      (left, right) =>
+        right.score - left.score ||
+        sourcePriority[left.source] - sourcePriority[right.source] ||
+        left.name.localeCompare(right.name),
+    )
+    .filter((candidate) => {
+      const key = normalizeProductText(
+        [candidate.brand, candidate.name].filter(Boolean).join(' '),
+      );
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, limit);
+}
+
 export function hasReliableCandidate(candidates: ProductCandidate[]): boolean {
   return (candidates[0]?.score ?? 0) >= 0.72;
 }
@@ -687,6 +786,16 @@ export function candidateToDraft(candidate: ProductCandidate): ProductDraft {
     ingredientsText: candidate.ingredientsText ?? '',
     ingredientsSource: candidate.ingredientsSource ?? '',
     ingredientsSourceUrl: candidate.ingredientsSourceUrl ?? '',
+    usageText: candidate.usageText ?? '',
+    usageSource: candidate.usageSource ?? '',
+    usageSourceUrl: candidate.usageSourceUrl ?? '',
+    precautionsText: candidate.precautionsText ?? '',
+    precautionsSource: candidate.precautionsSource ?? '',
+    precautionsSourceUrl: candidate.precautionsSourceUrl ?? '',
+    informationConfidence: candidate.informationConfidence ?? '',
+    confidenceSource: candidate.confidenceSource ?? '',
+    confidenceSourceUrl: candidate.confidenceSourceUrl ?? '',
+    confidenceNote: candidate.confidenceNote ?? '',
   };
 }
 
