@@ -1168,7 +1168,7 @@ function ProductsExperience({ route, navigation }: ProductsExperienceProps) {
               setSelectedProductOwned(false);
               await loadProducts();
               setMessage(
-                'Produit retiré. Les routines futures utilisent maintenant des placeholders.',
+                'Produit retiré. Les routines futures utilisent maintenant des étapes sans produit.',
               );
               void AccessibilityInfo.announceForAccessibility(
                 'Produit retiré de Mes produits',
@@ -3935,8 +3935,8 @@ export function RoutineAssignmentSheet({
             </Text>
             {compatiblePlaceholder ? (
               <Text style={[styles.fieldHint, { color: colors.textSecondary }]}>
-                Le placeholder {category.toLocaleLowerCase('fr-FR')} sera
-                remplacé. Ses jours et son instruction seront conservés.
+                L’étape sans produit {category.toLocaleLowerCase('fr-FR')} sera
+                remplacée. Ses jours et son instruction seront conservés.
               </Text>
             ) : null}
             <View style={styles.routineWeekdays}>

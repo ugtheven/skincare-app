@@ -7,7 +7,6 @@ import {
   preferredRoutinePeriod,
   recognizedRoutineCategory,
   routineNameForPeriod,
-  scheduledDateForRoutine,
   scheduledDateForPeriod,
   suggestedRoutineInsertionIndex,
   type DailyStepStatus,
@@ -20,6 +19,7 @@ import {
 
 import type {
   CreateRoutineInput,
+  ReplaceRoutineFromDateInput,
   RoutineRepository,
   RoutineStepInput,
 } from './routine-repository';
@@ -40,6 +40,7 @@ type StepRow = {
   id: string;
   routine_id: string;
   product_id: string | null;
+  product_image_url?: string | null;
   title: string;
   category: RoutineStep['category'];
   instruction: string | null;
@@ -97,6 +98,7 @@ function toStep(
     id: row.id,
     routineId,
     productId: row.product_id,
+    productImageUrl: row.product_image_url ?? null,
     title: row.title,
     category: row.category,
     instruction: row.instruction,
@@ -158,6 +160,14 @@ function inputFromStepRow(step: StepRow): RoutineStepInput {
     isActive: Boolean(step.is_active),
     selectedWeekdays: toWeekdays(step.selected_weekdays),
   };
+}
+
+function matchesRoutineStep(row: StepRow, step: RoutineStepInput) {
+  return (
+    row.product_id === (step.productId ?? null) &&
+    row.category === step.category &&
+    row.title === step.title.trim()
+  );
 }
 
 async function markStepProductsAsOwned(
@@ -408,6 +418,7 @@ export class SQLiteRoutineRepository implements RoutineRepository {
 
   async getRoutineForEditing(
     period: Routine['period'],
+    effectiveOn?: string,
   ): Promise<RoutineDefinition | null> {
     const db = await this.openDatabase();
     const row = await db.getFirstAsync<RoutineRow>(
@@ -416,13 +427,23 @@ export class SQLiteRoutineRepository implements RoutineRepository {
     );
     if (!row) return null;
 
-    const revision = await db.getFirstAsync<{ id: string }>(
-      'SELECT id FROM routine_revisions WHERE routine_id = ? ORDER BY effective_from DESC LIMIT 1',
-      row.id,
-    );
+    const revision = effectiveOn
+      ? await db.getFirstAsync<{ id: string }>(
+          'SELECT id FROM routine_revisions WHERE routine_id = ? AND effective_from <= ? ORDER BY effective_from DESC LIMIT 1',
+          row.id,
+          effectiveOn,
+        )
+      : await db.getFirstAsync<{ id: string }>(
+          'SELECT id FROM routine_revisions WHERE routine_id = ? ORDER BY effective_from DESC LIMIT 1',
+          row.id,
+        );
     const steps = revision
       ? await db.getAllAsync<StepRow>(
-          'SELECT routine_revision_steps.*, NULL AS status FROM routine_revision_steps WHERE revision_id = ? ORDER BY position ASC',
+          `SELECT routine_revision_steps.*, products.image_url AS product_image_url, NULL AS status
+           FROM routine_revision_steps LEFT JOIN products
+             ON products.id = routine_revision_steps.product_id
+           WHERE routine_revision_steps.revision_id = ?
+           ORDER BY routine_revision_steps.position ASC`,
           revision.id,
         )
       : [];
@@ -471,8 +492,10 @@ export class SQLiteRoutineRepository implements RoutineRepository {
     if (!revision) return null;
     const weekday = new Date(`${scheduledDate}T12:00:00`).getDay();
     const steps = await db.getAllAsync<StepRow>(
-      `SELECT routine_revision_steps.*, daily_step_statuses.status
-       FROM routine_revision_steps LEFT JOIN daily_step_statuses
+      `SELECT routine_revision_steps.*, products.image_url AS product_image_url, daily_step_statuses.status
+       FROM routine_revision_steps LEFT JOIN products
+         ON products.id = routine_revision_steps.product_id
+       LEFT JOIN daily_step_statuses
          ON daily_step_statuses.revision_step_id = routine_revision_steps.id AND daily_step_statuses.scheduled_date = ?
        WHERE routine_revision_steps.revision_id = ? AND routine_revision_steps.is_active = 1
          AND instr(',' || routine_revision_steps.selected_weekdays || ',', ',' || ? || ',') > 0
@@ -490,7 +513,9 @@ export class SQLiteRoutineRepository implements RoutineRepository {
 
   async createRoutine(input: CreateRoutineInput): Promise<RoutineOccurrence> {
     const db = await this.openDatabase();
-    const createdAt = nowIso();
+    const createdOn = new Date();
+    const createdAt = createdOn.toISOString();
+    const effectiveFrom = input.effectiveFrom ?? formatLocalDate(createdOn);
     const routine: Routine = {
       id: createId(),
       name: routineNameForPeriod(input.period),
@@ -513,14 +538,14 @@ export class SQLiteRoutineRepository implements RoutineRepository {
         'INSERT INTO routine_revisions (id, routine_id, effective_from, created_at) VALUES (?, ?, ?, ?)',
         revisionId,
         routine.id,
-        LEGACY_EFFECTIVE_FROM,
+        effectiveFrom,
         createdAt,
       );
       await markStepProductsAsOwned(db, steps, createdAt);
       for (const step of steps)
         await this.insertRevisionStep(db, revisionId, step, createdAt);
     });
-    const scheduledDate = scheduledDateForRoutine(routine, new Date());
+    const scheduledDate = effectiveFrom;
     const occurrence = await this.getOccurrenceForDate({
       period: routine.period,
       scheduledDate,
@@ -567,6 +592,95 @@ export class SQLiteRoutineRepository implements RoutineRepository {
       await markStepProductsAsOwned(db, nextSteps, createdAt);
       for (const step of nextSteps)
         await this.insertRevisionStep(db, revisionId, step, createdAt);
+      await db.runAsync(
+        'UPDATE routines SET updated_at = ? WHERE id = ?',
+        createdAt,
+        routineId,
+      );
+    });
+  }
+
+  async replaceRoutineFromDate({
+    routineId,
+    effectiveFrom,
+    sourceStepIds,
+    steps,
+  }: ReplaceRoutineFromDateInput): Promise<void> {
+    const earliestRoutineDate = new Date();
+    earliestRoutineDate.setDate(earliestRoutineDate.getDate() - 1);
+    if (effectiveFrom < formatLocalDate(earliestRoutineDate)) {
+      throw new Error('Une révision ne peut pas modifier le passé');
+    }
+
+    const db = await this.openDatabase();
+    const nextSteps = validatedSteps(steps);
+    const createdAt = nowIso();
+    const revisionId = createId();
+    const currentRevision = await db.getFirstAsync<{ id: string }>(
+      'SELECT id FROM routine_revisions WHERE routine_id = ? AND effective_from <= ? ORDER BY effective_from DESC LIMIT 1',
+      routineId,
+      effectiveFrom,
+    );
+    const currentRows = currentRevision
+      ? await db.getAllAsync<StepRow>(
+          `SELECT routine_revision_steps.*, daily_step_statuses.status
+           FROM routine_revision_steps LEFT JOIN daily_step_statuses
+             ON daily_step_statuses.revision_step_id = routine_revision_steps.id
+             AND daily_step_statuses.scheduled_date = ?
+           WHERE routine_revision_steps.revision_id = ?
+           ORDER BY routine_revision_steps.position ASC`,
+          effectiveFrom,
+          currentRevision.id,
+        )
+      : [];
+    const unmatchedRows = [...currentRows];
+    const preservedStatuses = nextSteps.map((step, index) => {
+      const sourceStepId = sourceStepIds[index];
+      let matchIndex = sourceStepId
+        ? unmatchedRows.findIndex((row) => row.id === sourceStepId)
+        : -1;
+      if (matchIndex < 0) {
+        matchIndex = unmatchedRows.findIndex((row) =>
+          matchesRoutineStep(row, step),
+        );
+      }
+      if (matchIndex < 0) return null;
+      const [matched] = unmatchedRows.splice(matchIndex, 1);
+      return matched.status;
+    });
+
+    await db.withTransactionAsync(async () => {
+      await db.runAsync(
+        'DELETE FROM routine_revisions WHERE routine_id = ? AND effective_from >= ?',
+        routineId,
+        effectiveFrom,
+      );
+      await db.runAsync(
+        'INSERT INTO routine_revisions (id, routine_id, effective_from, created_at) VALUES (?, ?, ?, ?)',
+        revisionId,
+        routineId,
+        effectiveFrom,
+        createdAt,
+      );
+      await markStepProductsAsOwned(db, nextSteps, createdAt);
+      for (const [index, step] of nextSteps.entries()) {
+        const stepId = await this.insertRevisionStep(
+          db,
+          revisionId,
+          step,
+          createdAt,
+        );
+        const status = preservedStatuses[index];
+        if (status) {
+          await db.runAsync(
+            'INSERT INTO daily_step_statuses (revision_step_id, scheduled_date, status, updated_at) VALUES (?, ?, ?, ?)',
+            stepId,
+            effectiveFrom,
+            status,
+            createdAt,
+          );
+        }
+      }
       await db.runAsync(
         'UPDATE routines SET updated_at = ? WHERE id = ?',
         createdAt,
@@ -722,9 +836,10 @@ export class SQLiteRoutineRepository implements RoutineRepository {
     step: RoutineStepInput,
     createdAt: string,
   ) {
+    const stepId = createId();
     await db.runAsync(
       `INSERT INTO routine_revision_steps (id, revision_id, product_id, title, category, instruction, position, is_active, selected_weekdays, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      createId(),
+      stepId,
       revisionId,
       step.productId ?? null,
       step.title.trim(),
@@ -736,6 +851,7 @@ export class SQLiteRoutineRepository implements RoutineRepository {
       createdAt,
       createdAt,
     );
+    return stepId;
   }
 }
 

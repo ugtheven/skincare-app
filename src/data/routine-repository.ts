@@ -17,7 +17,15 @@ export type RoutineStepInput = {
   selectedWeekdays?: Weekday[];
 };
 
+export type ReplaceRoutineFromDateInput = {
+  routineId: string;
+  effectiveFrom: string;
+  sourceStepIds: (string | null)[];
+  steps: RoutineStepInput[];
+};
+
 export type CreateRoutineInput = {
+  effectiveFrom?: string;
   name: string;
   period: RoutinePeriod;
   /** Compatibility input for the pre-planning onboarding. */
@@ -28,6 +36,7 @@ export type CreateRoutineInput = {
 export interface RoutineRepository {
   getRoutineForEditing(
     period: RoutinePeriod,
+    effectiveOn?: string,
   ): Promise<RoutineDefinition | null>;
   getCurrentOccurrence(now: Date): Promise<RoutineOccurrence | null>;
   getOccurrenceForDate(input: {
@@ -40,6 +49,7 @@ export interface RoutineRepository {
     effectiveFrom: string;
     steps: RoutineStepInput[];
   }): Promise<void>;
+  replaceRoutineFromDate(input: ReplaceRoutineFromDateInput): Promise<void>;
   setStepStatus(input: {
     stepId: string;
     scheduledDate: string;

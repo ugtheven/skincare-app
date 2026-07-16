@@ -13,6 +13,20 @@ Record only decisions that should guide future work.
 
 ## Decisions
 
+### 2026-07-16 - Today edits apply to the active routine day
+
+- **Status:** accepted
+- **Context:** Editing a routine from Today and returning to an unchanged checklist makes a successful save look broken, especially before 04:00 when the active routine day is the previous local date.
+- **Decision:** An edit launched from Today applies to the exact routine date currently displayed and to future days. Keep older revisions immutable. Preserve completed and skipped statuses for unchanged logical steps. Routine management outside Today continues to stage changes for the next routine day.
+- **Consequences:** Today must pass its occurrence date into the editor rather than derive the date from the wall clock. Saving replaces revisions from that date forward, refreshes Today before closing, and carries forward current-day statuses when steps are reordered or otherwise remain logically equivalent.
+
+### 2026-07-15 - Clinical warmth for Today and routines
+
+- **Status:** accepted
+- **Context:** The first routine loop was functional but its photographic hero, card-heavy layout, and deep editor navigation made daily use feel less direct and less premium than intended.
+- **Decision:** Give Today and routine editing a scoped light palette built around deep petrol, cool mist, warm off-white, ink, slate, moss, and amber. Replace the Today photograph with a quiet code-native time horizon. Keep the selected routine as the screen's primary status, present its steps as a flat tactile list, and open edits in a contextual sheet that preserves the Today screen underneath. Product-less steps use the user-facing term “étape sans produit” and expose a visible “Choisir un produit” action.
+- **Consequences:** The Scan retains its existing global colors and visuals. Routine interactions use restrained motion, persistence-confirmed haptics, reduced-motion support, 44-point targets, and direct return to the active routine. New routine surfaces should extend the scoped palette instead of changing scanner tokens or reintroducing decorative photography.
+
 ### 2026-07-15 - Today uses one shared routine day and explicit handled states
 
 - **Status:** accepted

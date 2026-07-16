@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useFocusEffect } from 'expo-router';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { AppState, type AppStateStatus } from 'react-native';
 
 import { routineRepository } from '@/data/sqlite-routine-repository';
 import {
@@ -11,10 +13,36 @@ import {
 
 export type TodayOccurrences = Record<RoutinePeriod, RoutineOccurrence | null>;
 
+export type RoutineRefreshOptions = {
+  activePeriod?: RoutinePeriod;
+  silent?: boolean;
+};
+
 const EMPTY_OCCURRENCES: TodayOccurrences = {
   morning: null,
   evening: null,
 };
+
+type StepMutation = {
+  persistedStatus: DailyStepStatus | null;
+  queue: Promise<void>;
+  sequence: number;
+};
+
+function nextRoutineBoundary(now: Date): Date {
+  const candidates = [4, 18].map((hour) => {
+    const boundary = new Date(now);
+    boundary.setHours(hour, 0, 0, 0);
+    if (boundary.getTime() <= now.getTime()) {
+      boundary.setDate(boundary.getDate() + 1);
+    }
+    return boundary;
+  });
+
+  return candidates.reduce((next, candidate) =>
+    candidate.getTime() < next.getTime() ? candidate : next,
+  );
+}
 
 export function useRoutine() {
   const [occurrences, setOccurrences] =
@@ -24,9 +52,13 @@ export function useRoutine() {
   );
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const occurrencesRef = useRef(occurrences);
+  const refreshSequenceRef = useRef(0);
+  const stepMutationsRef = useRef(new Map<string, StepMutation>());
 
-  const refresh = useCallback(async () => {
-    setIsLoading(true);
+  const refresh = useCallback(async (options: RoutineRefreshOptions = {}) => {
+    const requestSequence = ++refreshSequenceRef.current;
+    if (!options.silent) setIsLoading(true);
     setError(null);
 
     try {
@@ -46,23 +78,62 @@ export function useRoutine() {
       const nextOccurrences = { morning, evening };
       const fallbackPeriod =
         preferredPeriod === 'morning' ? 'evening' : 'morning';
+      if (requestSequence !== refreshSequenceRef.current) return;
+      occurrencesRef.current = nextOccurrences;
       setOccurrences(nextOccurrences);
+      const requestedPeriod = options.activePeriod;
       setActivePeriod(
-        nextOccurrences[preferredPeriod]
-          ? preferredPeriod
-          : nextOccurrences[fallbackPeriod]
-            ? fallbackPeriod
-            : preferredPeriod,
+        requestedPeriod && nextOccurrences[requestedPeriod]
+          ? requestedPeriod
+          : nextOccurrences[preferredPeriod]
+            ? preferredPeriod
+            : nextOccurrences[fallbackPeriod]
+              ? fallbackPeriod
+              : preferredPeriod,
       );
     } catch {
-      setError('Les routines ne peuvent pas être chargées pour le moment.');
+      if (requestSequence === refreshSequenceRef.current) {
+        setError('Les routines ne peuvent pas être chargées pour le moment.');
+      }
     } finally {
-      setIsLoading(false);
+      if (requestSequence === refreshSequenceRef.current) setIsLoading(false);
     }
   }, []);
 
+  useFocusEffect(
+    useCallback(() => {
+      void refresh({ silent: true });
+    }, [refresh]),
+  );
+
   useEffect(() => {
-    void refresh();
+    let previousState: AppStateStatus = AppState.currentState;
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      const isReturningToForeground =
+        previousState !== 'active' && nextState === 'active';
+      previousState = nextState;
+      if (isReturningToForeground) void refresh({ silent: true });
+    });
+
+    return () => subscription.remove();
+  }, [refresh]);
+
+  useEffect(() => {
+    let timeout: ReturnType<typeof setTimeout>;
+
+    const scheduleNextRefresh = () => {
+      const now = new Date();
+      timeout = setTimeout(
+        () => {
+          void refresh({ silent: true });
+          scheduleNextRefresh();
+        },
+        nextRoutineBoundary(now).getTime() - now.getTime(),
+      );
+    };
+
+    scheduleNextRefresh();
+    return () => clearTimeout(timeout);
   }, [refresh]);
 
   const setStepStatus = useCallback(
@@ -70,62 +141,96 @@ export function useRoutine() {
       period: RoutinePeriod,
       stepId: string,
       status: DailyStepStatus | null,
-    ) => {
-      const occurrence = occurrences[period];
-      if (!occurrence) return;
+    ): Promise<boolean> => {
+      const occurrence = occurrencesRef.current[period];
+      if (!occurrence) return false;
 
       const currentStep = occurrence.steps.find((step) => step.id === stepId);
-      if (!currentStep || currentStep.status === status) return;
+      if (!currentStep || currentStep.status === status) return false;
 
-      const previousStatus = currentStep.status;
+      const mutationKey = `${period}:${occurrence.scheduledDate}:${stepId}`;
+      const mutation = stepMutationsRef.current.get(mutationKey) ?? {
+        persistedStatus: currentStep.status,
+        queue: Promise.resolve(),
+        sequence: 0,
+      };
+      const sequence = ++mutation.sequence;
+      stepMutationsRef.current.set(mutationKey, mutation);
       setError(null);
-      setOccurrences({
-        ...occurrences,
-        [period]: {
-          ...occurrence,
-          steps: occurrence.steps.map((step) =>
-            step.id === stepId
-              ? {
-                  ...step,
-                  completed: status === 'completed',
-                  status,
-                }
-              : step,
-          ),
-        },
+      const updateStatus = (
+        currentOccurrences: TodayOccurrences,
+        nextStatus: DailyStepStatus | null,
+      ): TodayOccurrences => {
+        const currentOccurrence = currentOccurrences[period];
+        if (!currentOccurrence) return currentOccurrences;
+        return {
+          ...currentOccurrences,
+          [period]: {
+            ...currentOccurrence,
+            steps: currentOccurrence.steps.map((step) =>
+              step.id === stepId
+                ? {
+                    ...step,
+                    completed: nextStatus === 'completed',
+                    status: nextStatus,
+                  }
+                : step,
+            ),
+          },
+        };
+      };
+      occurrencesRef.current = updateStatus(occurrencesRef.current, status);
+      setOccurrences((currentOccurrences) => {
+        const nextOccurrences = updateStatus(currentOccurrences, status);
+        occurrencesRef.current = nextOccurrences;
+        return nextOccurrences;
       });
 
-      try {
-        await routineRepository.setStepStatus({
-          stepId,
-          scheduledDate: occurrence.scheduledDate,
-          status,
+      const operation = mutation.queue
+        .catch(() => undefined)
+        .then(async () => {
+          await routineRepository.setStepStatus({
+            stepId,
+            scheduledDate: occurrence.scheduledDate,
+            status,
+          });
+          mutation.persistedStatus = status;
         });
-      } catch {
-        setOccurrences((currentOccurrences) => {
-          const currentOccurrence = currentOccurrences[period];
-          if (!currentOccurrence) return currentOccurrences;
+      mutation.queue = operation;
 
-          return {
-            ...currentOccurrences,
-            [period]: {
-              ...currentOccurrence,
-              steps: currentOccurrence.steps.map((step) =>
-                step.id === stepId && step.status === status
-                  ? {
-                      ...step,
-                      completed: previousStatus === 'completed',
-                      status: previousStatus,
-                    }
-                  : step,
-              ),
-            },
-          };
-        });
-        setError('Cette étape n’a pas pu être enregistrée. Réessaie.');
+      try {
+        await operation;
+        const isCurrentIntent = mutation.sequence === sequence;
+        if (isCurrentIntent) stepMutationsRef.current.delete(mutationKey);
+        return isCurrentIntent;
+      } catch {
+        const isCurrentIntent = mutation.sequence === sequence;
+        if (isCurrentIntent) {
+          const currentStatus =
+            occurrencesRef.current[period]?.steps.find(
+              (step) => step.id === stepId,
+            )?.status ?? null;
+          if (currentStatus === status) {
+            occurrencesRef.current = updateStatus(
+              occurrencesRef.current,
+              mutation.persistedStatus,
+            );
+            setOccurrences((currentOccurrences) => {
+              const nextOccurrences = updateStatus(
+                currentOccurrences,
+                mutation.persistedStatus,
+              );
+              occurrencesRef.current = nextOccurrences;
+              return nextOccurrences;
+            });
+          }
+          stepMutationsRef.current.delete(mutationKey);
+          setError('Cette étape n’a pas pu être enregistrée. Réessaie.');
+        }
+        return false;
       }
     },
-    [occurrences],
+    [],
   );
 
   return {

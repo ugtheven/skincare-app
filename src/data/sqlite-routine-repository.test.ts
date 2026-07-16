@@ -236,6 +236,63 @@ describe('migrateDatabase', () => {
 });
 
 describe('SQLiteRoutineRepository editing', () => {
+  it('loads the revision displayed by Today instead of a later pending revision', async () => {
+    const getFirstAsync = jest.fn(async (sql: string) => {
+      if (sql.includes('FROM routines WHERE period')) {
+        return {
+          id: 'morning-routine',
+          name: 'Routine du matin',
+          period: 'morning',
+          created_at: '2026-07-14T08:00:00.000Z',
+          updated_at: '2026-07-14T08:00:00.000Z',
+        };
+      }
+      if (sql.includes('effective_from <= ?')) {
+        return { id: 'today-revision' };
+      }
+      return { id: 'future-revision' };
+    });
+    const getAllAsync = jest.fn().mockResolvedValue([
+      {
+        id: 'today-placeholder',
+        product_id: null,
+        title: 'Sérum',
+        category: 'Sérum',
+        instruction: 'Deux gouttes',
+        position: 0,
+        is_active: 1,
+        selected_weekdays: '0,1,2,3,4,5,6',
+        created_at: '2026-07-14T08:00:00.000Z',
+        updated_at: '2026-07-14T08:00:00.000Z',
+        status: null,
+      },
+    ]);
+    const repository = new SQLiteRoutineRepository(
+      jest.fn().mockResolvedValue({ getAllAsync, getFirstAsync }) as never,
+    );
+
+    const result = await repository.getRoutineForEditing(
+      'morning',
+      '2026-07-15',
+    );
+
+    expect(getFirstAsync).toHaveBeenCalledWith(
+      expect.stringContaining('effective_from <= ?'),
+      'morning-routine',
+      '2026-07-15',
+    );
+    expect(getAllAsync).toHaveBeenCalledWith(
+      expect.any(String),
+      'today-revision',
+    );
+    expect(result?.steps[0]).toEqual(
+      expect.objectContaining({
+        id: 'today-placeholder',
+        instruction: 'Deux gouttes',
+      }),
+    );
+  });
+
   it('atomically replaces only the pending revision and reopens its complete definition', async () => {
     const runAsync = jest.fn().mockResolvedValue(undefined);
     const getFirstAsync = jest.fn(async (sql: string) => {
@@ -326,6 +383,60 @@ describe('SQLiteRoutineRepository editing', () => {
     });
   });
 
+  it('applies a Today edit immediately while preserving its completed steps', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-07-16T12:00:00.000Z'));
+    const runAsync = jest.fn().mockResolvedValue(undefined);
+    const db = {
+      getFirstAsync: jest.fn().mockResolvedValue({ id: 'today-revision' }),
+      getAllAsync: jest.fn().mockResolvedValue([
+        {
+          id: 'cleanser-step',
+          product_id: null,
+          title: 'Nettoyant',
+          category: 'Nettoyant',
+          instruction: null,
+          position: 0,
+          is_active: 1,
+          selected_weekdays: '0,1,2,3,4,5,6',
+          created_at: '2026-07-15T08:00:00.000Z',
+          updated_at: '2026-07-15T08:00:00.000Z',
+          status: 'completed',
+        },
+      ]),
+      runAsync,
+      withTransactionAsync: jest.fn(async (operation: () => Promise<void>) =>
+        operation(),
+      ),
+    };
+    const repository = new SQLiteRoutineRepository(
+      jest.fn().mockResolvedValue(db) as never,
+    );
+
+    await repository.replaceRoutineFromDate({
+      routineId: 'morning-routine',
+      effectiveFrom: '2026-07-15',
+      sourceStepIds: [null, 'cleanser-step'],
+      steps: [
+        { title: 'Tonique', category: 'Tonique', position: 0 },
+        { title: 'Nettoyant', category: 'Nettoyant', position: 1 },
+      ],
+    });
+
+    expect(runAsync).toHaveBeenCalledWith(
+      'DELETE FROM routine_revisions WHERE routine_id = ? AND effective_from >= ?',
+      'morning-routine',
+      '2026-07-15',
+    );
+    expect(runAsync).toHaveBeenCalledWith(
+      'INSERT INTO daily_step_statuses (revision_step_id, scheduled_date, status, updated_at) VALUES (?, ?, ?, ?)',
+      expect.any(String),
+      '2026-07-15',
+      'completed',
+      '2026-07-16T12:00:00.000Z',
+    );
+    jest.useRealTimers();
+  });
+
   it('replaces a compatible placeholder and marks ownership in the same transaction', async () => {
     const runAsync = jest.fn().mockResolvedValue(undefined);
     const db = {
@@ -400,6 +511,114 @@ describe('SQLiteRoutineRepository editing', () => {
 });
 
 describe('SQLiteRoutineRepository daily execution', () => {
+  it('dates a new routine from creation or an explicit routine day', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-07-15T00:30:00.000Z'));
+    const runAsync = jest.fn().mockResolvedValue(undefined);
+    const db = {
+      getFirstAsync: jest.fn(async (sql: string) => {
+        if (sql.includes('FROM routines WHERE period')) {
+          return {
+            id: 'evening-routine',
+            name: 'Routine du soir',
+            period: 'evening',
+            created_at: '2026-07-15T00:30:00.000Z',
+            updated_at: '2026-07-15T00:30:00.000Z',
+          };
+        }
+        if (sql.includes('FROM routine_revisions')) return { id: 'revision-1' };
+        return null;
+      }),
+      getAllAsync: jest.fn().mockResolvedValue([
+        {
+          id: 'step-1',
+          routine_id: 'evening-routine',
+          product_id: null,
+          title: 'Hydratant',
+          category: 'Hydratant',
+          instruction: null,
+          position: 0,
+          is_active: 1,
+          selected_weekdays: '0,1,2,3,4,5,6',
+          created_at: '2026-07-15T00:30:00.000Z',
+          updated_at: '2026-07-15T00:30:00.000Z',
+          status: null,
+        },
+      ]),
+      runAsync,
+      withTransactionAsync: jest.fn(async (operation: () => Promise<void>) =>
+        operation(),
+      ),
+    };
+    const repository = new SQLiteRoutineRepository(
+      jest.fn().mockResolvedValue(db) as never,
+    );
+
+    const created = await repository.createRoutine({
+      name: 'Routine du soir',
+      period: 'evening',
+      steps: [{ title: 'Hydratant', category: 'Hydratant', position: 0 }],
+    });
+
+    expect(runAsync).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO routine_revisions'),
+      expect.any(String),
+      expect.any(String),
+      '2026-07-15',
+      '2026-07-15T00:30:00.000Z',
+    );
+    expect(created.scheduledDate).toBe('2026-07-15');
+
+    const contextual = await repository.createRoutine({
+      effectiveFrom: '2026-07-14',
+      name: 'Routine du soir',
+      period: 'evening',
+      steps: [{ title: 'Hydratant', category: 'Hydratant', position: 0 }],
+    });
+    expect(runAsync).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO routine_revisions'),
+      expect.any(String),
+      expect.any(String),
+      '2026-07-14',
+      '2026-07-15T00:30:00.000Z',
+    );
+    expect(contextual.scheduledDate).toBe('2026-07-14');
+    jest.useRealTimers();
+  });
+
+  it('does not expose a routine before its first revision date', async () => {
+    const db = {
+      getFirstAsync: jest.fn(async (sql: string) => {
+        if (sql.includes('FROM routines WHERE period')) {
+          return {
+            id: 'morning-routine',
+            name: 'Routine du matin',
+            period: 'morning',
+            created_at: '2026-07-15T08:00:00.000Z',
+            updated_at: '2026-07-15T08:00:00.000Z',
+          };
+        }
+        return null;
+      }),
+      getAllAsync: jest.fn(),
+    };
+    const repository = new SQLiteRoutineRepository(
+      jest.fn().mockResolvedValue(db) as never,
+    );
+
+    await expect(
+      repository.getOccurrenceForDate({
+        period: 'morning',
+        scheduledDate: '2026-07-14',
+      }),
+    ).resolves.toBeNull();
+    expect(db.getFirstAsync).toHaveBeenLastCalledWith(
+      expect.stringContaining('effective_from <= ?'),
+      'morning-routine',
+      '2026-07-14',
+    );
+    expect(db.getAllAsync).not.toHaveBeenCalled();
+  });
+
   it('opens evening before 04:00 and keeps the fallback on the same routine day', async () => {
     const repository = new SQLiteRoutineRepository(jest.fn() as never);
     const getOccurrenceForDate = jest
@@ -424,7 +643,8 @@ describe('SQLiteRoutineRepository daily execution', () => {
       {
         id: 'placeholder-step',
         routine_id: 'morning-routine',
-        product_id: null,
+        product_id: 'moisturizer-product',
+        product_image_url: 'https://example.com/moisturizer.webp',
         title: 'Hydratant',
         category: 'Hydratant',
         instruction: null,
@@ -470,10 +690,12 @@ describe('SQLiteRoutineRepository daily execution', () => {
       3,
     );
     expect(getAllAsync.mock.calls[0][0]).toContain('selected_weekdays');
+    expect(getAllAsync.mock.calls[0][0]).toContain('LEFT JOIN products');
     expect(result?.steps).toEqual([
       expect.objectContaining({
         completed: false,
-        productId: null,
+        productId: 'moisturizer-product',
+        productImageUrl: 'https://example.com/moisturizer.webp',
         status: 'skipped',
         title: 'Hydratant',
       }),

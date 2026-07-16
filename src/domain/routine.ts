@@ -36,6 +36,7 @@ export type RoutineStep = {
   id: string;
   routineId: string;
   productId: string | null;
+  productImageUrl?: string | null;
   title: string;
   category: RoutineCategory;
   instruction: string | null;
