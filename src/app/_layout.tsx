@@ -1,15 +1,27 @@
 import { StatusBar } from 'expo-status-bar';
 import { Tabs } from 'expo-router';
-import { Text } from 'react-native';
+import { StyleSheet, Text } from 'react-native';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SymbolView } from 'expo-symbols';
 
+import { AppTabBarBackground, AppTabBarButton } from '@/components/app-tab-bar';
 import { Colors } from '@/constants/theme';
+
+function renderTabBarBackground() {
+  return <AppTabBarBackground />;
+}
+
+function renderTabBarButton(
+  props: React.ComponentProps<typeof AppTabBarButton>,
+) {
+  return <AppTabBarButton {...props} />;
+}
 
 export default function RootLayout() {
   const colors = Colors;
 
   return (
-    <>
+    <GestureHandlerRootView style={{ flex: 1 }}>
       <StatusBar style="dark" />
       <Tabs
         screenOptions={{
@@ -19,12 +31,22 @@ export default function RootLayout() {
           headerShadowVisible: false,
           tabBarActiveTintColor: colors.tint,
           tabBarInactiveTintColor: colors.textSecondary,
+          tabBarBackground: renderTabBarBackground,
+          tabBarButton: renderTabBarButton,
+          tabBarHideOnKeyboard: true,
+          tabBarIconStyle: styles.tabBarIcon,
           tabBarStyle: {
-            backgroundColor: colors.tabBar,
-            borderTopColor: colors.separator,
+            backgroundColor: 'transparent',
+            borderTopWidth: 0,
+            elevation: 0,
+            shadowColor: colors.text,
+            shadowOffset: { width: 0, height: -2 },
+            shadowOpacity: 0.08,
+            shadowRadius: 8,
           },
           tabBarLabelStyle: {
             fontSize: 11,
+            lineHeight: 14,
             fontWeight: '600',
           },
         }}
@@ -72,6 +94,12 @@ export default function RootLayout() {
           }}
         />
       </Tabs>
-    </>
+    </GestureHandlerRootView>
   );
 }
+
+const styles = StyleSheet.create({
+  tabBarIcon: {
+    marginTop: 1,
+  },
+});

@@ -1,4 +1,4 @@
-import { fireEvent, render, waitFor } from '@testing-library/react-native';
+import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
 import { Alert, Pressable, Text } from 'react-native';
 
 import { productRepository } from '@/data/sqlite-product-repository';
@@ -21,6 +21,14 @@ jest.mock('expo-symbols', () => ({
   SymbolView: () => null,
 }));
 
+jest.mock('expo-haptics', () => ({
+  ImpactFeedbackStyle: { Light: 'light', Medium: 'medium' },
+  NotificationFeedbackType: { Success: 'success' },
+  impactAsync: jest.fn().mockResolvedValue(undefined),
+  notificationAsync: jest.fn().mockResolvedValue(undefined),
+  selectionAsync: jest.fn().mockResolvedValue(undefined),
+}));
+
 jest.mock('react-native-safe-area-context', () => ({
   useSafeAreaInsets: () => ({ top: 0, right: 0, bottom: 0, left: 0 }),
 }));
@@ -29,6 +37,7 @@ jest.mock('@/data/sqlite-routine-repository', () => ({
   routineRepository: {
     createRoutine: jest.fn(),
     getRoutineForEditing: jest.fn(),
+    replaceRoutineFromDate: jest.fn(),
     replaceRoutineForFuture: jest.fn(),
   },
 }));
@@ -52,7 +61,7 @@ const serumProduct: Product = {
   brand: 'Exemple',
   category: 'Sérum',
   barcode: null,
-  imageUrl: null,
+  imageUrl: 'https://example.com/serum.webp',
   imageSource: null,
   imageSourceUrl: null,
   imageLicense: null,
@@ -126,15 +135,17 @@ beforeEach(() => {
     scheduledDate: '2026-07-14',
   });
   mockedRepository.replaceRoutineForFuture.mockResolvedValue(undefined);
+  mockedRepository.replaceRoutineFromDate.mockResolvedValue(undefined);
   mockedProductRepository.listOwnedProducts.mockResolvedValue([serumProduct]);
 });
 
-it('creates a fixed-name routine from a controlled category placeholder', async () => {
+it('creates a fixed-name routine from a step without a product', async () => {
   const onSaved = jest.fn();
   const view = await render(<RoutineManager onboarding onSaved={onSaved} />);
 
   await fireEvent.press(await view.findByLabelText('Créer Routine du matin'));
-  await fireEvent.press(view.getByText('Ajouter un placeholder'));
+  await fireEvent.press(view.getByText('Ajouter une étape'));
+  await fireEvent.press(view.getByText('Ajouter sans produit'));
   await fireEvent.press(view.getByText('Nettoyant'));
   await fireEvent.press(view.getByLabelText('Enregistrer Routine du matin'));
 
@@ -157,7 +168,165 @@ it('creates a fixed-name routine from a controlled category placeholder', async 
   expect(onSaved).toHaveBeenCalledTimes(1);
 });
 
-it('replaces a compatible placeholder without losing its planning or instruction', async () => {
+it('creates a missing routine on the routine day opened from Today', async () => {
+  const view = await render(
+    <RoutineManager
+      initialEffectiveFromDate="2026-07-14"
+      initialPeriod="evening"
+      onClose={jest.fn()}
+      onSaved={jest.fn()}
+    />,
+  );
+
+  await fireEvent.press(view.getByText('Ajouter une étape'));
+  await fireEvent.press(view.getByText('Ajouter sans produit'));
+  await fireEvent.press(view.getByText('Hydratant'));
+  await fireEvent.press(view.getByLabelText('Enregistrer Routine du soir'));
+
+  await waitFor(() =>
+    expect(mockedRepository.createRoutine).toHaveBeenCalledWith(
+      expect.objectContaining({
+        effectiveFrom: '2026-07-14',
+        period: 'evening',
+      }),
+    ),
+  );
+});
+
+it('opens a contextual period and product target directly', async () => {
+  showDefinitions(
+    definition('morning', [
+      {
+        ...routineStep('serum-step', 'Sérum', 0),
+        instruction: 'Deux gouttes',
+        selectedWeekdays: [1, 3, 5],
+      },
+    ]),
+  );
+  const onClose = jest.fn();
+  const onSaved = jest.fn();
+  const view = await render(
+    <RoutineManager
+      initialEffectiveFromDate="2026-07-13"
+      initialPeriod="morning"
+      initialProductTargetStepId="serum-step"
+      onClose={onClose}
+      onSaved={onSaved}
+    />,
+  );
+
+  await waitFor(() =>
+    expect(mockedRepository.getRoutineForEditing).toHaveBeenCalledWith(
+      'morning',
+      '2026-07-13',
+    ),
+  );
+
+  expect(
+    await view.findByLabelText('Ajouter Exemple Sérum apaisant à la routine'),
+  ).toBeTruthy();
+  expect(view.queryByText('Mes routines')).toBeNull();
+
+  await fireEvent.press(
+    view.getByLabelText('Ajouter Exemple Sérum apaisant à la routine'),
+  );
+  expect(view.queryByText('Terminer')).toBeNull();
+  expect(view.getByTestId('routine-step-image')).toBeTruthy();
+  expect(
+    view.getByText('Actives aujourd’hui, sans modifier le passé.'),
+  ).toBeTruthy();
+  await fireEvent.press(view.getByLabelText('Enregistrer Routine du matin'));
+
+  await waitFor(() =>
+    expect(mockedRepository.replaceRoutineFromDate).toHaveBeenCalledWith({
+      routineId: 'morning-routine',
+      effectiveFrom: '2026-07-13',
+      sourceStepIds: ['serum-step'],
+      steps: [
+        expect.objectContaining({
+          category: 'Sérum',
+          productId: 'serum-product',
+        }),
+      ],
+    }),
+  );
+  expect(mockedRepository.replaceRoutineForFuture).not.toHaveBeenCalled();
+  await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
+  expect(onClose).toHaveBeenCalledTimes(1);
+  await waitFor(() =>
+    expect(view.getByText('Enregistrer la routine')).toBeTruthy(),
+  );
+});
+
+it('closes a contextual routine instead of opening the routines overview', async () => {
+  showDefinitions(
+    definition('morning', [routineStep('cleanser-step', 'Nettoyant', 0)]),
+  );
+  const onClose = jest.fn();
+  const view = await render(
+    <RoutineManager
+      initialPeriod="morning"
+      onClose={onClose}
+      onSaved={jest.fn()}
+    />,
+  );
+
+  await fireEvent.press(await view.findByLabelText('Fermer la routine'));
+
+  expect(onClose).toHaveBeenCalledTimes(1);
+  expect(view.queryByText('Mes routines')).toBeNull();
+});
+
+it('describes a contextual deletion as effective from Today', async () => {
+  showDefinitions(
+    definition('morning', [routineStep('cleanser-step', 'Nettoyant', 0)]),
+  );
+  const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => undefined);
+  const view = await render(
+    <RoutineManager
+      initialEffectiveFromDate="2026-07-15"
+      initialPeriod="morning"
+      onClose={jest.fn()}
+      onSaved={jest.fn()}
+    />,
+  );
+
+  await fireEvent.press(await view.findByLabelText('Supprimer Nettoyant'));
+
+  expect(alert).toHaveBeenCalledWith(
+    'Supprimer « Nettoyant » ?',
+    'Cette étape sera retirée de la routine à partir d’aujourd’hui.',
+    expect.any(Array),
+  );
+});
+
+it('offers all products and Products search when no category matches', async () => {
+  showDefinitions(
+    definition('morning', [routineStep('cleanser-step', 'Nettoyant', 0)]),
+  );
+  const onBrowseProducts = jest.fn();
+  const view = await render(
+    <RoutineManager
+      initialPeriod="morning"
+      initialProductTargetStepId="cleanser-step"
+      onBrowseProducts={onBrowseProducts}
+      onSaved={jest.fn()}
+    />,
+  );
+
+  expect(
+    await view.findByText('Aucun produit nettoyant dans Mes produits.'),
+  ).toBeTruthy();
+  await fireEvent.press(view.getByText('Rechercher dans Produits'));
+  expect(onBrowseProducts).toHaveBeenCalledTimes(1);
+
+  await fireEvent.press(view.getByText('Voir tous mes produits'));
+  expect(
+    await view.findByLabelText('Ajouter Exemple Sérum apaisant à la routine'),
+  ).toBeTruthy();
+});
+
+it('replaces a compatible step without losing its planning or instruction', async () => {
   showDefinitions(
     definition('morning', [
       {
@@ -172,11 +341,11 @@ it('replaces a compatible placeholder without losing its planning or instruction
   await fireEvent.press(
     await view.findByLabelText('Modifier Routine du matin'),
   );
-  await fireEvent.press(view.getByLabelText('Lier un produit à Sérum'));
+  await fireEvent.press(view.getByLabelText('Choisir un produit pour Sérum'));
   await fireEvent.press(
     await view.findByLabelText('Ajouter Exemple Sérum apaisant à la routine'),
   );
-  await fireEvent.press(view.getByText('Terminer'));
+  expect(view.queryByText('Terminer')).toBeNull();
   await fireEvent.press(view.getByLabelText('Enregistrer Routine du matin'));
 
   await waitFor(() =>
@@ -193,6 +362,87 @@ it('replaces a compatible placeholder without losing its planning or instruction
         }),
       ],
     }),
+  );
+});
+
+it('lets a linked product be changed or removed without losing the step', async () => {
+  showDefinitions(
+    definition('morning', [
+      {
+        ...routineStep('linked-serum', 'Sérum', 0),
+        instruction: 'Deux gouttes',
+        productId: 'old-product',
+        selectedWeekdays: [1, 3, 5],
+        title: 'Ancien sérum',
+      },
+    ]),
+  );
+  const view = await render(<RoutineManager onSaved={jest.fn()} />);
+
+  await fireEvent.press(
+    await view.findByLabelText('Modifier Routine du matin'),
+  );
+  await fireEvent.press(
+    view.getByLabelText('Configurer Sérum, lun · mer · ven'),
+  );
+  expect(view.getByLabelText('Changer le produit de Sérum')).toBeTruthy();
+
+  await fireEvent.press(view.getByLabelText('Retirer le produit de Sérum'));
+  await fireEvent.press(view.getByText('Terminer'));
+  expect(view.getByLabelText('Choisir un produit pour Sérum')).toBeTruthy();
+  await fireEvent.press(view.getByLabelText('Enregistrer Routine du matin'));
+
+  await waitFor(() =>
+    expect(mockedRepository.replaceRoutineForFuture).toHaveBeenCalledWith(
+      expect.objectContaining({
+        steps: [
+          expect.objectContaining({
+            instruction: 'Deux gouttes',
+            productId: null,
+            selectedWeekdays: [1, 3, 5],
+          }),
+        ],
+      }),
+    ),
+  );
+});
+
+it('disables saving when an existing routine has no changes', async () => {
+  showDefinitions(
+    definition('morning', [routineStep('cleanser', 'Nettoyant', 0)]),
+  );
+  const view = await render(<RoutineManager onSaved={jest.fn()} />);
+
+  await fireEvent.press(
+    await view.findByLabelText('Modifier Routine du matin'),
+  );
+
+  expect(
+    view.getByLabelText('Routine du matin à jour').props.accessibilityState,
+  ).toEqual({ busy: false, disabled: true });
+});
+
+it('shows product photos and category placeholders in the step list', async () => {
+  showDefinitions(
+    definition('morning', [
+      routineStep('cleanser', 'Nettoyant', 0),
+      {
+        ...routineStep('serum', 'Sérum', 1),
+        productId: serumProduct.id,
+        productImageUrl: 'https://example.com/serum.webp',
+        title: serumProduct.name,
+      },
+    ]),
+  );
+  const view = await render(<RoutineManager onSaved={jest.fn()} />);
+
+  await fireEvent.press(
+    await view.findByLabelText('Modifier Routine du matin'),
+  );
+
+  expect(view.getAllByTestId('routine-step-image')).toHaveLength(1);
+  expect(view.getAllByTestId('routine-step-category-placeholder')).toHaveLength(
+    1,
   );
 });
 
@@ -219,9 +469,8 @@ it('keeps the routine draft while a scanned product returns to the editor', asyn
   await fireEvent.press(
     await view.findByLabelText('Modifier Routine du matin'),
   );
-  await fireEvent.press(
-    view.getByLabelText('Ajouter un produit à Routine du matin'),
-  );
+  await fireEvent.press(view.getByText('Ajouter une étape'));
+  await fireEvent.press(view.getByText('Choisir un produit'));
   await fireEvent.press(await view.findByText('Scanner un nouveau produit'));
   await fireEvent.press(view.getByText('Choisir le produit scanné'));
   await fireEvent.press(view.getByText('Terminer'));
@@ -259,9 +508,8 @@ it('allows the same product in more than one routine step', async () => {
   await fireEvent.press(
     await view.findByLabelText('Modifier Routine du matin'),
   );
-  await fireEvent.press(
-    view.getByLabelText('Ajouter un produit à Routine du matin'),
-  );
+  await fireEvent.press(view.getByText('Ajouter une étape'));
+  await fireEvent.press(view.getByText('Choisir un produit'));
   await fireEvent.press(
     await view.findByLabelText('Ajouter Exemple Sérum apaisant à la routine'),
   );
@@ -324,7 +572,14 @@ it('stores the visible order after reordering steps', async () => {
   await fireEvent.press(
     await view.findByLabelText('Modifier Routine du matin'),
   );
-  await fireEvent.press(view.getByLabelText('Descendre Nettoyant'));
+  expect(
+    view.getByLabelText('Réordonner Nettoyant').props.accessibilityHint,
+  ).toBe('Maintiens puis fais glisser pour changer l’ordre');
+  await act(async () => {
+    view.getByLabelText('Réordonner Nettoyant').props.onAccessibilityAction({
+      nativeEvent: { actionName: 'move-down' },
+    });
+  });
   await fireEvent.press(view.getByLabelText('Enregistrer Routine du matin'));
 
   await waitFor(() => {
